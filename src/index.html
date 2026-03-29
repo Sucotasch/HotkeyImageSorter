@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Minimal Sorter</title>
+  <link rel="stylesheet" href="style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sidebar: Image List -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <button id="btn-select-folder" class="btn-primary">Select Folder</button>
+        <div class="sort-controls">
+          <select id="sort-by">
+            <option value="name">Name</option>
+            <option value="modified">Date</option>
+            <option value="size">Size</option>
+          </select>
+          <button id="btn-sort-dir" title="Toggle Sort Direction">↑↓</button>
+        </div>
+      </div>
+      <div id="image-list-container" class="virtual-list">
+        <!-- Virtual items will be injected here -->
+      </div>
+      <div class="sidebar-footer">
+        <span id="file-count">0 images</span>
+      </div>
+    </aside>
+
+    <!-- Main Viewport -->
+    <main class="viewer-container">
+      <div id="image-viewport" class="viewport">
+        <img id="main-image" src="" alt="">
+        <div id="crop-overlay" class="crop-overlay hidden">
+          <div class="crop-region" id="crop-region">
+            <div class="crop-handle nw"></div>
+            <div class="crop-handle ne"></div>
+            <div class="crop-handle sw"></div>
+            <div class="crop-handle se"></div>
+            <div class="crop-label">Double-click to crop</div>
+          </div>
+        </div>
+      </div>
+      <div class="viewer-footer">
+        <div class="viewer-actions">
+          <button id="btn-rotate" class="btn-action" title="Rotate 90° (Ctrl+R)">⟳ Rotate</button>
+          <button id="btn-crop" class="btn-action" title="Toggle Crop (Ctrl+C)">✂ Crop</button>
+        </div>
+        <div class="file-info">
+          <span id="current-file-path" class="info-path">No image selected</span>
+          <div id="file-meta" class="file-meta hidden">
+            <span id="info-dimensions" class="meta-item">—</span>
+            <span id="info-date" class="meta-item">—</span>
+            <span id="info-size" class="meta-item">—</span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Right Panel: Shortcuts & Info -->
+    <aside class="info-panel">
+      <div class="panel-section">
+        <h3>Shortcuts</h3>
+        <ul id="shortcut-legend" class="shortcut-list">
+          <!-- Populated from config -->
+        </ul>
+        <button id="btn-config-hotkeys" class="btn-secondary">Edit Hotkeys</button>
+      </div>
+      <div class="panel-section">
+        <h3>Commands</h3>
+        <div class="command-hints">
+          <kbd>↑</kbd> <kbd>↓</kbd> Navigate<br>
+          <kbd>Home</kbd> <kbd>End</kbd> First / Last<br>
+          <kbd>Del</kbd> Move to Recycle Bin<br>
+          <kbd>Ctrl+R</kbd> Rotate 90°<br>
+          <kbd>Ctrl+C</kbd> Toggle Crop<br>
+          <kbd>Ctrl+Z</kbd> Undo
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="modal-settings" class="modal hidden">
+    <div class="modal-content">
+      <h2>Hotkey Configuration</h2>
+      <div id="hotkey-edit-list" class="hotkey-edit-list">
+        <!-- Rendered dynamically -->
+      </div>
+      <div class="modal-actions">
+        <button id="btn-close-settings" class="btn-primary">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>

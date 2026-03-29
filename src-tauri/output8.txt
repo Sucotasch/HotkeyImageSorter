@@ -1,0 +1,127 @@
+﻿cargo : warning: failed to auto-cle
+an cache data
+строка:1 знак:1
++ cargo check > output.txt 2>&1
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotS 
+   pecified: (warning: failed to   
+  auto-clean cache data:String)    
+ [], RemoteException
+    + FullyQualifiedErrorId : Nati 
+   veCommandError
+ 
+
+failed to clean entries from the gl
+obal cache
+
+Caused by:
+  failed to remove file `C:\Users\s
+ucot\.cargo\registry\src\index.crat
+es.io-1949cf8c6b5b557f\icu_locale_c
+ore-2.0.0\src\data.rs`
+
+Caused by:
+  ╨Ю╤В╨║╨░╨╖╨░╨╜╨╛ ╨▓ ╨┤╨╛╤Б╤В╤Г╨┐╨
+╡. (os error 5)
+    Checking tauri-app v0.1.0 (D:\A
+rx\Software Downloads\_Images_EDIT-
+pack\Image sorter\src-tauri)
+warning: unused import: `PathBuf`
+ --> src\file_ops.rs:1:23
+  |
+1 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]`
+ (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused import: `GenericIma
+geView`
+ --> src\image_proc.rs:1:13
+  |
+1 | use image::{GenericImageView};
+  |             ^^^^^^^^^^^^^^^^
+
+error[E0382]: use of moved value: `
+metadata`
+  --> src\file_ops.rs:21:36
+   |
+19 |                     let metada
+ta = entry.metadata().ok();
+   |                         ------
+-- move occurs because `metadata` h
+as type `std::option::Option<Metada
+ta>`, which does not implement the 
+`Copy` trait
+20 |                     let size =
+ metadata.map(|m| m.len()).unwrap_o
+r(0);
+   |                               
+ -------- ---------------- `metadat
+a` moved due to this method call
+   |                               
+ |
+   |                               
+ help: consider calling `.as_ref()`
+ or `.as_mut()` to borrow the type'
+s contents
+21 |                     let modifi
+ed = metadata
+   |                               
+     ^^^^^^^^ value used here after
+ move
+   |
+note: `std::option::Option::<T>::ma
+p` takes ownership of the receiver 
+`self`, which moves `metadata`
+  --> /rustc/01f6ddf7588f42ae2d7eb0
+a2f21d44e8e96674cf\library\core\src
+\option.rs:1160:28
+help: you can `clone` the value and
+ consume it, but this might not be 
+your desired behavior
+   |
+20 |                     let size =
+ metadata.clone().map(|m| m.len()).
+unwrap_or(0);
+   |                               
+         ++++++++
+
+warning: variable does not need to 
+be mutable
+  --> src\image_proc.rs:18:9
+   |
+18 |     let mut img = image::open(
+path).map_err(|e| e.to_string())?;
+   |         ----^^^
+   |         |
+   |         help: remove this `mut
+`
+   |
+   = note: `#[warn(unused_mut)]` (p
+art of `#[warn(unused)]`) on by def
+ault
+
+warning: unused variable: `target_d
+ir`
+  --> src\lib.rs:44:17
+   |
+44 |             let target_dir = o
+ld_path.parent().ok_or("Invalid par
+ent")?.to_string_lossy();
+   |                 ^^^^^^^^^^ hel
+p: if this is intentional, prefix i
+t with an underscore: `_target_dir`
+   |
+   = note: `#[warn(unused_variables
+)]` (part of `#[warn(unused)]`) on 
+by default
+
+For more information about this err
+or, try `rustc --explain E0382`.
+warning: `tauri-app` (lib) generate
+d 4 warnings
+error: could not compile `tauri-app
+` (lib) due to 1 previous error; 4 
+warnings emitted
