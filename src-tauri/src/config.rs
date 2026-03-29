@@ -41,6 +41,7 @@ pub fn get_config() -> AppConfig {
         last_file: None,
         sort_by: Some("name".to_string()),
         sort_dir: Some(1),
+        minimize_to_tray: Some(true),
     }
 }
 

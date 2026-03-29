@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub sort_by: Option<String>,
     #[serde(default)]
     pub sort_dir: Option<i32>,
+    #[serde(default)]
+    pub minimize_to_tray: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -13,6 +13,8 @@ let state = {
   sort: { by: 'name', dir: 1 } // 1: asc, -1: desc
 };
 
+let currentZoom = 1;
+
 // UI Elements
 const el = {
   imageList: document.getElementById('image-list-container'),
@@ -48,6 +50,12 @@ async function init() {
     state.folder = state.config.last_folder;
     await loadFiles(state.config.last_file);
   }
+  
+  if (state.config.minimize_to_tray !== false) {
+    document.getElementById('toggle-tray').checked = true;
+  }
+  
+  updateHistoryStats();
 }
 
 function setupEventListeners() {
@@ -56,6 +64,20 @@ function setupEventListeners() {
   document.getElementById('btn-close-settings').addEventListener('click', toggleSettings);
   el.btnRotate.addEventListener('click', () => doRotate());
   el.btnCrop.addEventListener('click', () => toggleCrop());
+  document.getElementById('btn-undo').addEventListener('click', () => doUndo());
+  document.getElementById('btn-redo').addEventListener('click', () => doRedo());
+  
+  document.getElementById('toggle-tray').addEventListener('change', (e) => {
+    state.config.minimize_to_tray = e.target.checked;
+    invoke('save_config', { config: state.config });
+  });
+
+  el.mainImage.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (e.deltaY < 0) currentZoom = Math.min(10, currentZoom + 0.1);
+    else currentZoom = Math.max(0.1, currentZoom - 0.1);
+    el.mainImage.style.transform = `scale(${currentZoom})`;
+  }, { passive: false });
   
   // Navigation
   window.addEventListener('keydown', handleGlobalKeydown);
@@ -162,11 +184,13 @@ async function selectImage(index) {
   state.config.last_file = img.path;
   invoke('save_config', { config: state.config });
   
-  // Use Tauri's convertFileSrc for local images (Tauri 2.0 uses a different scheme)
-  // Actually, in Tauri 2.0, use window.__TAURI__.core.convertFileSrc
+  // Use Tauri's convertFileSrc for local images
   const src = window.__TAURI__.core.convertFileSrc(img.path);
   el.mainImage.src = src;
   el.filePath.textContent = img.path;
+  
+  currentZoom = 1;
+  el.mainImage.style.transform = 'scale(1)';
   
   // Update meta info
   const date = new Date(img.modified * 1000);
@@ -238,28 +262,27 @@ async function handleGlobalKeydown(e) {
   } else if (e.ctrlKey && (code === 'KeyC' || key === 'c')) {
     toggleCrop();
   } else if (e.ctrlKey && (code === 'KeyZ' || key === 'z')) {
-    try {
-      const undonePath = await invoke('undo_last_move');
-      if (undonePath) {
-        await loadFiles();
-        refreshCurrentImage();
-      }
-    } catch(err) { console.warn("Undo failed:", err); }
+    e.preventDefault();
+    await doUndo();
+  } else if (e.ctrlKey && (code === 'KeyX' || key === 'x')) {
+    e.preventDefault();
+    await doRedo();
   } else if (code && code.startsWith('Key')) {
     const char = code.replace('Key', '').toLowerCase();
-    const targetDir = state.config.hotkeys[char];
-    if (targetDir) {
-      const newPath = await invoke('move_image', { source: state.currentPath, targetDir });
-      state.images.splice(state.currentIndex, 1);
-      renderList();
-      el.fileCount.textContent = `${state.images.length} images`;
-      if (state.images.length > 0) {
-        selectImage(Math.min(state.currentIndex, state.images.length - 1));
-      } else {
-        el.mainImage.src = '';
-        state.currentPath = '';
+      const targetDir = state.config.hotkeys[char];
+      if (targetDir) {
+        const newPath = await invoke('move_image', { source: state.currentPath, targetDir });
+        state.images.splice(state.currentIndex, 1);
+        renderList();
+        el.fileCount.textContent = `${state.images.length} images`;
+        if (state.images.length > 0) {
+          selectImage(Math.min(state.currentIndex, state.images.length - 1));
+        } else {
+          el.mainImage.src = '';
+          state.currentPath = '';
+        }
+        updateHistoryStats();
       }
-    }
   }
 }
 
@@ -267,6 +290,37 @@ async function doRotate() {
   if (!state.currentPath) return;
   await invoke('rotate_image', { path: state.currentPath, degrees: 90 });
   refreshCurrentImage();
+  updateHistoryStats();
+}
+
+async function doUndo() {
+  try {
+    const undonePath = await invoke('undo_last_move');
+    if (undonePath) {
+      await loadFiles();
+      refreshCurrentImage();
+      updateHistoryStats();
+    }
+  } catch(err) { console.warn("Undo failed:", err); }
+}
+
+async function doRedo() {
+  try {
+    const redonePath = await invoke('redo_last_move');
+    if (redonePath) {
+      await loadFiles();
+      refreshCurrentImage();
+      updateHistoryStats();
+    }
+  } catch(err) { console.warn("Redo failed:", err); }
+}
+
+async function updateHistoryStats() {
+  try {
+    const [undoCount, redoCount] = await invoke('get_history_stats');
+    document.getElementById('count-undo').textContent = undoCount;
+    document.getElementById('count-redo').textContent = redoCount;
+  } catch(err) { console.warn("Failed to get history stats:", err); }
 }
 
 function refreshCurrentImage() {
@@ -353,16 +407,10 @@ async function executeCrop() {
   const imgRect = el.mainImage.getBoundingClientRect();
   const regionRect = el.cropRegion.getBoundingClientRect();
   
-  const fitScale = Math.min(imgRect.width / el.mainImage.naturalWidth, imgRect.height / el.mainImage.naturalHeight);
-  const scale = Math.min(1, fitScale);
+  const scale = imgRect.width / el.mainImage.naturalWidth;
   
-  const renderW = el.mainImage.naturalWidth * scale;
-  const renderH = el.mainImage.naturalHeight * scale;
-  const offsetX = (imgRect.width - renderW) / 2;
-  const offsetY = (imgRect.height - renderH) / 2;
-  
-  let relativeX = (regionRect.left - imgRect.left) - offsetX;
-  let relativeY = (regionRect.top - imgRect.top) - offsetY;
+  let relativeX = regionRect.left - imgRect.left;
+  let relativeY = regionRect.top - imgRect.top;
   
   const x = Math.round(relativeX / scale);
   const y = Math.round(relativeY / scale);
@@ -377,6 +425,7 @@ async function executeCrop() {
   await invoke('crop_image', { path: state.currentPath, x: finalX, y: finalY, width: finalW, height: finalH });
   toggleCrop();
   refreshCurrentImage();
+  updateHistoryStats();
 }
 
 // Shortcuts & Settings

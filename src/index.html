@@ -48,6 +48,8 @@
         <div class="viewer-actions">
           <button id="btn-rotate" class="btn-action" title="Rotate 90° (Ctrl+R)">⟳ Rotate</button>
           <button id="btn-crop" class="btn-action" title="Toggle Crop (Ctrl+C)">✂ Crop</button>
+          <button id="btn-undo" class="btn-action" title="Undo (Ctrl+Z)">↶ Undo (<span id="count-undo">0</span>)</button>
+          <button id="btn-redo" class="btn-action" title="Redo (Ctrl+X)">↷ Redo (<span id="count-redo">0</span>)</button>
         </div>
         <div class="file-info">
           <span id="current-file-path" class="info-path">No image selected</span>
@@ -77,7 +79,8 @@
           <kbd>Del</kbd> Move to Recycle Bin<br>
           <kbd>Ctrl+R</kbd> Rotate 90°<br>
           <kbd>Ctrl+C</kbd> Toggle Crop<br>
-          <kbd>Ctrl+Z</kbd> Undo
+          <kbd>Ctrl+Z</kbd> Undo / <kbd>Ctrl+X</kbd> Redo<br>
+          <kbd>Wheel</kbd> Zoom Image
         </div>
       </div>
     </aside>
@@ -89,6 +92,13 @@
       <h2>Hotkey Configuration</h2>
       <div id="hotkey-edit-list" class="hotkey-edit-list">
         <!-- Rendered dynamically -->
+      </div>
+      <div class="settings-toggles">
+        <label class="toggle-container">
+          <span class="toggle-label">Minimize to tray on close</span>
+          <input type="checkbox" id="toggle-tray">
+          <span class="slider round"></span>
+        </label>
       </div>
       <div class="modal-actions">
         <button id="btn-close-settings" class="btn-primary">Done</button>
