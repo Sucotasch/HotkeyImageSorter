@@ -209,6 +209,15 @@ async function handleGlobalKeydown(e) {
   } else if (code === 'End' || key === 'end') {
     e.preventDefault();
     if (state.images.length > 0) selectImage(state.images.length - 1);
+  } else if (code === 'Escape' || key === 'escape') {
+    e.preventDefault();
+    if (state.isCropActive) {
+      toggleCrop();
+    } else if (!el.modalSettings.classList.contains('hidden')) {
+      toggleSettings();
+    } else {
+      invoke('hide_window');
+    }
   } else if (code === 'Delete' || key === 'delete') {
     if (state.currentPath) {
       try {
@@ -391,35 +400,27 @@ function toggleSettings() {
 }
 
 function renderSettingsList() {
-  const RESERVED = new Set(['r', 'c']);
   el.hotkeyEditList.innerHTML = '';
   "abcdefghijklmnopqrstuvwxyz".split('').forEach(key => {
     const row = document.createElement('div');
     row.style.display = 'contents';
-    const isReserved = RESERVED.has(key);
-    const currentPath = isReserved ? '(Reserved: system command)' : (state.config.hotkeys[key] || 'Not set');
+    const currentPath = state.config.hotkeys[key] || 'Not set';
     
     const kbd = document.createElement('kbd');
     kbd.textContent = key.toUpperCase();
-    if (isReserved) kbd.style.opacity = '0.4';
     
     const span = document.createElement('span');
     span.textContent = currentPath;
-    if (isReserved) span.style.opacity = '0.4';
     
     const btn = document.createElement('button');
     btn.textContent = 'Set';
-    btn.disabled = isReserved;
-    btn.style.opacity = isReserved ? '0.3' : '1';
-    if (!isReserved) {
-      btn.addEventListener('click', async () => {
-        const selected = await open({ directory: true });
-        if (selected) {
-          state.config.hotkeys[key] = selected;
-          renderSettingsList();
-        }
-      });
-    }
+    btn.addEventListener('click', async () => {
+      const selected = await open({ directory: true });
+      if (selected) {
+        state.config.hotkeys[key] = selected;
+        renderSettingsList();
+      }
+    });
 
     row.appendChild(kbd);
     row.appendChild(span);

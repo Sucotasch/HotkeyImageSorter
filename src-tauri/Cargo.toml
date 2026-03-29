@@ -30,4 +30,5 @@ chrono = "0.4"
 directories = "5"
 tauri-plugin-window-state = "2.4.1"
 trash = "5.2.5"
+tauri-plugin-single-instance = "2.4.0"
 
