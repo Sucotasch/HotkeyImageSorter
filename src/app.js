@@ -10,7 +10,8 @@ let state = {
   config: { hotkeys: {} },
   isCropActive: false,
   cropRegion: { x: 50, y: 50, w: 200, h: 200 },
-  sort: { by: 'name', dir: 1 } // 1: asc, -1: desc
+  sort: { by: 'name', dir: 1 },
+  selectedPaths: new Set()
 };
 
 let currentZoom = 1;
@@ -168,11 +169,34 @@ function renderList() {
   el.imageList.innerHTML = '';
   state.images.forEach((img, index) => {
     const div = document.createElement('div');
-    div.className = `list-item ${index === state.currentIndex ? 'active' : ''}`;
+    const isActive = index === state.currentIndex ? 'active' : '';
+    const isSelected = state.selectedPaths.has(img.path) ? 'selected' : '';
+    
+    div.className = `list-item ${isActive} ${isSelected}`;
     div.textContent = img.name;
-    div.addEventListener('click', () => selectImage(index));
+    div.addEventListener('click', (e) => handleItemClick(e, index));
     el.imageList.appendChild(div);
   });
+}
+
+function handleItemClick(e, index) {
+  const path = state.images[index].path;
+  if (e.ctrlKey) {
+    if (state.selectedPaths.has(path)) state.selectedPaths.delete(path);
+    else state.selectedPaths.add(path);
+    selectImage(index);
+  } else if (e.shiftKey) {
+    const start = Math.min(state.currentIndex === -1 ? 0 : state.currentIndex, index);
+    const end = Math.max(state.currentIndex === -1 ? 0 : state.currentIndex, index);
+    state.selectedPaths.clear();
+    for (let i = start; i <= end; i++) {
+        state.selectedPaths.add(state.images[i].path);
+    }
+    selectImage(index);
+  } else {
+    state.selectedPaths.clear();
+    selectImage(index);
+  }
 }
 
 async function selectImage(index) {
@@ -204,9 +228,10 @@ async function selectImage(index) {
     el.infoDimensions.textContent = `${el.mainImage.naturalWidth} × ${el.mainImage.naturalHeight} px`;
   };
   
-  // Update active status in list
-  document.querySelectorAll('.list-item').forEach((el, i) => {
-    el.classList.toggle('active', i === index);
+  // Update active and selected statuses in list
+  document.querySelectorAll('.list-item').forEach((elem, i) => {
+    elem.classList.toggle('active', i === index);
+    elem.classList.toggle('selected', state.selectedPaths.has(state.images[i].path));
   });
   
   // Scroll into view if needed
@@ -223,9 +248,23 @@ async function handleGlobalKeydown(e) {
   
   if (code === 'ArrowDown' || key === 'arrowdown') {
     e.preventDefault();
+    if (e.shiftKey && state.currentIndex >= 0 && state.currentIndex < state.images.length) {
+      state.selectedPaths.add(state.currentPath);
+      const nextIndex = state.currentIndex + 1;
+      if (nextIndex < state.images.length) {
+         state.selectedPaths.add(state.images[nextIndex].path);
+      }
+    }
     selectImage(state.currentIndex + 1);
   } else if (code === 'ArrowUp' || key === 'arrowup') {
     e.preventDefault();
+    if (e.shiftKey && state.currentIndex >= 0 && state.currentIndex < state.images.length) {
+      state.selectedPaths.add(state.currentPath);
+      const nextIndex = state.currentIndex - 1;
+      if (nextIndex >= 0) {
+         state.selectedPaths.add(state.images[nextIndex].path);
+      }
+    }
     selectImage(state.currentIndex - 1);
   } else if (code === 'Home' || key === 'home') {
     e.preventDefault();
@@ -242,18 +281,33 @@ async function handleGlobalKeydown(e) {
     } else {
       invoke('hide_window');
     }
+  } else if (code === 'Insert' || key === 'insert') {
+    e.preventDefault();
+    if (state.currentPath) {
+        if (state.selectedPaths.has(state.currentPath)) state.selectedPaths.delete(state.currentPath);
+        else state.selectedPaths.add(state.currentPath);
+        
+        if (state.currentIndex < state.images.length - 1) {
+            selectImage(state.currentIndex + 1);
+        } else {
+            renderList();
+        }
+    }
   } else if (code === 'Delete' || key === 'delete') {
     if (state.currentPath) {
+      const pathsToRemove = state.selectedPaths.size > 0 ? Array.from(state.selectedPaths) : [state.currentPath];
       try {
-        await invoke('trash_image', { path: state.currentPath });
-        state.images.splice(state.currentIndex, 1);
-        renderList();
-        el.fileCount.textContent = `${state.images.length} images`;
+        await invoke('trash_images', { paths: pathsToRemove });
+        // The items before the current index will remain, items after will shift up.
+        // We handle selection clear and list re-render implicitly via loadFiles
+        let nextIndex = state.currentIndex;
+        state.selectedPaths.clear();
+        await loadFiles();
         if (state.images.length > 0) {
-          selectImage(Math.min(state.currentIndex, state.images.length - 1));
+            selectImage(Math.min(nextIndex, state.images.length - 1));
         } else {
-          el.mainImage.src = '';
-          state.currentPath = '';
+            el.mainImage.src = '';
+            state.currentPath = '';
         }
       } catch (err) { console.error("Failed to delete", err); }
     }
@@ -269,20 +323,23 @@ async function handleGlobalKeydown(e) {
     await doRedo();
   } else if (code && code.startsWith('Key')) {
     const char = code.replace('Key', '').toLowerCase();
-      const targetDir = state.config.hotkeys[char];
-      if (targetDir) {
-        const newPath = await invoke('move_image', { source: state.currentPath, targetDir });
-        state.images.splice(state.currentIndex, 1);
-        renderList();
-        el.fileCount.textContent = `${state.images.length} images`;
-        if (state.images.length > 0) {
-          selectImage(Math.min(state.currentIndex, state.images.length - 1));
-        } else {
-          el.mainImage.src = '';
-          state.currentPath = '';
-        }
-        updateHistoryStats();
-      }
+    const targetDir = state.config.hotkeys[char];
+    if (targetDir && state.currentPath) {
+        const pathsToMove = state.selectedPaths.size > 0 ? Array.from(state.selectedPaths) : [state.currentPath];
+        let nextIndex = state.currentIndex;
+        try {
+            await invoke('move_images', { sources: pathsToMove, targetDir });
+            state.selectedPaths.clear();
+            await loadFiles();
+            if (state.images.length > 0) {
+              selectImage(Math.min(nextIndex, state.images.length - 1));
+            } else {
+              el.mainImage.src = '';
+              state.currentPath = '';
+            }
+            updateHistoryStats();
+        } catch (err) { console.error("Move failed:", err); }
+    }
   }
 }
 

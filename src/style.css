@@ -58,10 +58,26 @@ body, html {
   border-bottom: 1px solid var(--border-color);
   overflow-wrap: break-word;
   word-break: break-all;
+  border-left: 3px solid transparent;
+  transition: background 0.1s;
+}
+
+.list-item:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.list-item.selected {
+  background-color: rgba(59, 130, 246, 0.3);
 }
 
 .list-item.active {
-  background-color: var(--primary-color);
+  border-left-color: var(--accent-color);
+  background-color: rgba(59, 130, 246, 0.1);
+}
+
+.list-item.selected.active {
+  background-color: rgba(59, 130, 246, 0.4);
+  border-left-color: var(--accent-color);
 }
 
 .sidebar-footer {
