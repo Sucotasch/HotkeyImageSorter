@@ -296,16 +296,32 @@ async function handleGlobalKeydown(e) {
   } else if (code === 'Delete' || key === 'delete') {
     if (state.currentPath) {
       const pathsToRemove = state.selectedPaths.size > 0 ? Array.from(state.selectedPaths) : [state.currentPath];
+      
+      let successorPath = null;
+      if (!state.selectedPaths.has(state.currentPath)) {
+        successorPath = state.currentPath;
+      } else {
+        for (let i = state.currentIndex + 1; i < state.images.length; i++) {
+          if (!state.selectedPaths.has(state.images[i].path)) {
+            successorPath = state.images[i].path;
+            break;
+          }
+        }
+        if (!successorPath) {
+          for (let i = state.currentIndex - 1; i >= 0; i--) {
+            if (!state.selectedPaths.has(state.images[i].path)) {
+              successorPath = state.images[i].path;
+              break;
+            }
+          }
+        }
+      }
+
       try {
         await invoke('trash_images', { paths: pathsToRemove });
-        // The items before the current index will remain, items after will shift up.
-        // We handle selection clear and list re-render implicitly via loadFiles
-        let nextIndex = state.currentIndex;
         state.selectedPaths.clear();
-        await loadFiles();
-        if (state.images.length > 0) {
-            selectImage(Math.min(nextIndex, state.images.length - 1));
-        } else {
+        await loadFiles(successorPath);
+        if (state.images.length === 0) {
             el.mainImage.src = '';
             state.currentPath = '';
         }
@@ -326,14 +342,32 @@ async function handleGlobalKeydown(e) {
     const targetDir = state.config.hotkeys[char];
     if (targetDir && state.currentPath) {
         const pathsToMove = state.selectedPaths.size > 0 ? Array.from(state.selectedPaths) : [state.currentPath];
-        let nextIndex = state.currentIndex;
+        
+        let successorPath = null;
+        if (!state.selectedPaths.has(state.currentPath)) {
+          successorPath = state.currentPath;
+        } else {
+          for (let i = state.currentIndex + 1; i < state.images.length; i++) {
+            if (!state.selectedPaths.has(state.images[i].path)) {
+              successorPath = state.images[i].path;
+              break;
+            }
+          }
+          if (!successorPath) {
+            for (let i = state.currentIndex - 1; i >= 0; i--) {
+              if (!state.selectedPaths.has(state.images[i].path)) {
+                successorPath = state.images[i].path;
+                break;
+              }
+            }
+          }
+        }
+
         try {
             await invoke('move_images', { sources: pathsToMove, targetDir });
             state.selectedPaths.clear();
-            await loadFiles();
-            if (state.images.length > 0) {
-              selectImage(Math.min(nextIndex, state.images.length - 1));
-            } else {
+            await loadFiles(successorPath);
+            if (state.images.length === 0) {
               el.mainImage.src = '';
               state.currentPath = '';
             }
