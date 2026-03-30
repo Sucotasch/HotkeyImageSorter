@@ -297,22 +297,20 @@ async function handleGlobalKeydown(e) {
     if (state.currentPath) {
       const pathsToRemove = state.selectedPaths.size > 0 ? Array.from(state.selectedPaths) : [state.currentPath];
       
+      const removalSet = new Set(pathsToRemove);
       let successorPath = null;
-      if (!state.selectedPaths.has(state.currentPath)) {
-        successorPath = state.currentPath;
-      } else {
-        for (let i = state.currentIndex + 1; i < state.images.length; i++) {
-          if (!state.selectedPaths.has(state.images[i].path)) {
+      
+      for (let i = state.currentIndex + 1; i < state.images.length; i++) {
+        if (!removalSet.has(state.images[i].path)) {
+          successorPath = state.images[i].path;
+          break;
+        }
+      }
+      if (!successorPath) {
+        for (let i = state.currentIndex - 1; i >= 0; i--) {
+          if (!removalSet.has(state.images[i].path)) {
             successorPath = state.images[i].path;
             break;
-          }
-        }
-        if (!successorPath) {
-          for (let i = state.currentIndex - 1; i >= 0; i--) {
-            if (!state.selectedPaths.has(state.images[i].path)) {
-              successorPath = state.images[i].path;
-              break;
-            }
           }
         }
       }
@@ -343,22 +341,20 @@ async function handleGlobalKeydown(e) {
     if (targetDir && state.currentPath) {
         const pathsToMove = state.selectedPaths.size > 0 ? Array.from(state.selectedPaths) : [state.currentPath];
         
+        const removalSet = new Set(pathsToMove);
         let successorPath = null;
-        if (!state.selectedPaths.has(state.currentPath)) {
-          successorPath = state.currentPath;
-        } else {
-          for (let i = state.currentIndex + 1; i < state.images.length; i++) {
-            if (!state.selectedPaths.has(state.images[i].path)) {
+
+        for (let i = state.currentIndex + 1; i < state.images.length; i++) {
+          if (!removalSet.has(state.images[i].path)) {
+            successorPath = state.images[i].path;
+            break;
+          }
+        }
+        if (!successorPath) {
+          for (let i = state.currentIndex - 1; i >= 0; i--) {
+            if (!removalSet.has(state.images[i].path)) {
               successorPath = state.images[i].path;
               break;
-            }
-          }
-          if (!successorPath) {
-            for (let i = state.currentIndex - 1; i >= 0; i--) {
-              if (!state.selectedPaths.has(state.images[i].path)) {
-                successorPath = state.images[i].path;
-                break;
-              }
             }
           }
         }
