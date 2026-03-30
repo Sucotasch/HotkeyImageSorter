@@ -67,6 +67,7 @@ function setupEventListeners() {
   el.btnCrop.addEventListener('click', () => toggleCrop());
   document.getElementById('btn-undo').addEventListener('click', () => doUndo());
   document.getElementById('btn-redo').addEventListener('click', () => doRedo());
+  document.getElementById('btn-refresh').addEventListener('click', () => loadFiles(state.currentPath));
   
   document.getElementById('toggle-tray').addEventListener('change', (e) => {
     state.config.minimize_to_tray = e.target.checked;
@@ -300,17 +301,23 @@ async function handleGlobalKeydown(e) {
       const removalSet = new Set(pathsToRemove);
       let successorPath = null;
       
-      for (let i = state.currentIndex + 1; i < state.images.length; i++) {
-        if (!removalSet.has(state.images[i].path)) {
-          successorPath = state.images[i].path;
-          break;
-        }
-      }
-      if (!successorPath) {
-        for (let i = state.currentIndex - 1; i >= 0; i--) {
+      // If the file under cursor is NOT being deleted — keep focus on it
+      if (!removalSet.has(state.currentPath)) {
+        successorPath = state.currentPath;
+      } else {
+        // Otherwise find the nearest non-deleted neighbour (first look down, then up)
+        for (let i = state.currentIndex + 1; i < state.images.length; i++) {
           if (!removalSet.has(state.images[i].path)) {
             successorPath = state.images[i].path;
             break;
+          }
+        }
+        if (!successorPath) {
+          for (let i = state.currentIndex - 1; i >= 0; i--) {
+            if (!removalSet.has(state.images[i].path)) {
+              successorPath = state.images[i].path;
+              break;
+            }
           }
         }
       }
@@ -344,17 +351,23 @@ async function handleGlobalKeydown(e) {
         const removalSet = new Set(pathsToMove);
         let successorPath = null;
 
-        for (let i = state.currentIndex + 1; i < state.images.length; i++) {
-          if (!removalSet.has(state.images[i].path)) {
-            successorPath = state.images[i].path;
-            break;
-          }
-        }
-        if (!successorPath) {
-          for (let i = state.currentIndex - 1; i >= 0; i--) {
+        // If the file under cursor is NOT being moved — keep focus on it
+        if (!removalSet.has(state.currentPath)) {
+          successorPath = state.currentPath;
+        } else {
+          // Otherwise find the nearest non-moved neighbour (first look down, then up)
+          for (let i = state.currentIndex + 1; i < state.images.length; i++) {
             if (!removalSet.has(state.images[i].path)) {
               successorPath = state.images[i].path;
               break;
+            }
+          }
+          if (!successorPath) {
+            for (let i = state.currentIndex - 1; i >= 0; i--) {
+              if (!removalSet.has(state.images[i].path)) {
+                successorPath = state.images[i].path;
+                break;
+              }
             }
           }
         }
