@@ -25,9 +25,18 @@ pub struct AppConfig {
     pub minimize_to_tray: Option<bool>,
 }
 
+/// The kind of operation an undo/redo entry records.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum UndoActionType {
+    /// A file was moved to another directory.
+    Move,
+    /// An image was edited (rotate/crop); `new_path` holds the temp backup.
+    Edit,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UndoAction {
     pub old_path: String,
     pub new_path: String,
-    pub action_type: String, // "move", "rotate", "crop"
+    pub action_type: UndoActionType,
 }

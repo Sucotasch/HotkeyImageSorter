@@ -48,13 +48,14 @@
 
 ### Supported Image Formats
 
-The application supports all standard image formats handled by the system:
+The application supports the formats decodable by its image backend:
 - JPEG/JPG
 - PNG
 - GIF
 - BMP
 - WebP
-- TIFF
+- TIFF/TIF
+- ICO
 
 ---
 
@@ -315,7 +316,7 @@ async function doUndo() {
 #### 6. Delete Image
 
 ```
-Delete or Backspace
+Delete
 ```
 Moves image to system trash (configurable in settings).
 
@@ -338,7 +339,7 @@ Moves image to system trash (configurable in settings).
 | Shortcut | Action |
 |----------|--------|
 | `A` - `Z` | Move to assigned directory |
-| `Delete` | Delete current image |
+| `Delete` | Trash current image / selection |
 
 ### Editing
 
@@ -396,12 +397,12 @@ All file operations are executed through Tauri commands:
 | Command | Parameters | Returns |
 |---------|------------|---------|
 | `list_files` | `{ dir: string }` | `ImageInfo[]` |
-| `move_image` | `{ source, targetDir }` | `newPath` |
+| `move_images` | `{ sources, targetDir }` | `newPath[]` |
 | `rotate_image` | `{ path, degrees }` | `void` |
-| `undo_last_move` | `{}` | `undonePath` |
-| `redo_last_move` | `{}` | `redonePath` |
+| `undo_last_move` | `{}` | `restoredPath` (empty if nothing to undo) |
+| `redo_last_move` | `{}` | `restoredPath` (empty if nothing to redo) |
 | `save_config` | `{ config }` | `void` |
-| `get_history_stats` | `{}` | `[undoCount, redoCount]` |
+| `get_history_stats` | `{}` | `[undoCount, redoCount]` (action counts) |
 
 ### Performance Considerations
 
@@ -463,7 +464,7 @@ npm run tauri build -- --target x86_64-pc-windows-msvc
 # Run Rust tests
 cd src-tauri && cargo test
 
-# Run frontend tests (if configured)
+# Run frontend tests (Node 21+)
 npm test
 ```
 
@@ -607,13 +608,14 @@ Contributions are welcome! Please read our contributing guidelines before submit
 
 ### Поддерживаемые форматы изображений
 
-Приложение поддерживает все стандартные форматы изображений:
+Приложение поддерживает форматы, декодируемые его графическим бэкендом:
 - JPEG/JPG
 - PNG
 - GIF
 - BMP
 - WebP
-- TIFF
+- TIFF/TIF
+- ICO
 
 ---
 
@@ -875,7 +877,7 @@ async function doUndo() {
 #### 6. Удаление изображения
 
 ```
-Delete или Backspace
+Delete
 ```
 Перемещает изображение в корзину системы (настраивается в настройках).
 
@@ -956,12 +958,12 @@ const state = {
 | Команда | Параметры | Возвращает |
 |---------|-----------|------------|
 | `list_files` | `{ dir: string }` | `ImageInfo[]` |
-| `move_image` | `{ source, targetDir }` | `newPath` |
+| `move_images` | `{ sources, targetDir }` | `newPath[]` |
 | `rotate_image` | `{ path, degrees }` | `void` |
-| `undo_last_move` | `{}` | `undonePath` |
-| `redo_last_move` | `{}` | `redonePath` |
+| `undo_last_move` | `{}` | `restoredPath` (empty if nothing to undo) |
+| `redo_last_move` | `{}` | `restoredPath` (empty if nothing to redo) |
 | `save_config` | `{ config }` | `void` |
-| `get_history_stats` | `{}` | `[undoCount, redoCount]` |
+| `get_history_stats` | `{}` | `[undoCount, redoCount]` (action counts) |
 
 ### Производительность
 

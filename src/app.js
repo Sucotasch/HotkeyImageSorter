@@ -1,4 +1,4 @@
-import { basename } from './utils.js';
+import { basename, escapeHtml } from './utils.js';
 
 const { invoke } = window.__TAURI__.core;
 const { open } = window.__TAURI__.dialog;
@@ -37,6 +37,21 @@ const el = {
   modalSettings: document.getElementById('modal-settings'),
   hotkeyEditList: document.getElementById('hotkey-edit-list')
 };
+
+// Transient error/info toast
+let toastTimer;
+function notify(msg, isError = true) {
+  let t = document.getElementById('toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.classList.toggle('error', isError);
+  clearTimeout(toastTimer);
+  if (msg) toastTimer = setTimeout(() => (t.textContent = ''), 4000);
+}
 
 // Initialization
 async function init() {
@@ -130,9 +145,18 @@ async function selectFolder() {
 }
 
 async function loadFiles(initialLoadPath = null) {
-  state.images = await invoke('list_files', { dir: state.folder });
-  sortAndRender(initialLoadPath);
+  try {
+    state.images = await invoke('list_files', { dir: state.folder });
+    sortAndRender(initialLoadPath);
+  } catch (err) {
+    state.images = [];
+    renderList();
+    el.fileCount.textContent = '0 images';
+    notify("Cannot load folder: " + err);
+  }
 }
+
+let lastListSignature = '';
 
 function sortAndRender(initialLoadPath = null) {
   state.images.sort((a, b) => {
@@ -140,7 +164,12 @@ function sortAndRender(initialLoadPath = null) {
     let valB = b[state.sort.by];
     return valA < valB ? -state.sort.dir : state.sort.dir;
   });
-  renderList();
+  // Avoid rebuilding the DOM when the list content/order is unchanged
+  const signature = state.images.map(i => i.path).join('\n');
+  if (signature !== lastListSignature) {
+    renderList();
+    lastListSignature = signature;
+  }
   el.fileCount.textContent = `${state.images.length} images`;
   
   if (initialLoadPath) {
@@ -244,7 +273,8 @@ async function selectImage(index) {
 
 // Global Keys
 async function handleGlobalKeydown(e) {
-  if (document.activeElement.tagName === 'INPUT') return;
+  const active = document.activeElement;
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'SELECT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
 
   const key = e.key.toLowerCase();
   const code = e.code;
@@ -296,7 +326,7 @@ async function handleGlobalKeydown(e) {
             renderList();
         }
     }
-  } else if (code === 'Delete' || key === 'delete') {
+  } else if ((code === 'Delete' || key === 'delete') && !e.ctrlKey && !e.metaKey && !e.altKey && el.modalSettings.classList.contains('hidden')) {
     if (state.currentPath) {
       const pathsToRemove = state.selectedPaths.size > 0 ? Array.from(state.selectedPaths) : [state.currentPath];
       
@@ -332,7 +362,7 @@ async function handleGlobalKeydown(e) {
             el.mainImage.src = '';
             state.currentPath = '';
         }
-      } catch (err) { console.error("Failed to delete", err); }
+      } catch (err) { notify("Delete failed: " + err); }
     }
   } else if (e.ctrlKey && (code === 'KeyR' || key === 'r')) {
     await doRotate();
@@ -344,7 +374,7 @@ async function handleGlobalKeydown(e) {
   } else if (e.ctrlKey && (code === 'KeyX' || key === 'x')) {
     e.preventDefault();
     await doRedo();
-  } else if (code && code.startsWith('Key')) {
+  } else if (code && code.startsWith('Key') && !e.ctrlKey && !e.metaKey && !e.altKey && el.modalSettings.classList.contains('hidden')) {
     const char = code.replace('Key', '').toLowerCase();
     const targetDir = state.config.hotkeys[char];
     if (targetDir && state.currentPath) {
@@ -383,38 +413,38 @@ async function handleGlobalKeydown(e) {
               state.currentPath = '';
             }
             updateHistoryStats();
-        } catch (err) { console.error("Move failed:", err); }
+        } catch (err) { notify("Move failed: " + err); }
     }
   }
 }
 
 async function doRotate() {
   if (!state.currentPath) return;
-  await invoke('rotate_image', { path: state.currentPath, degrees: 90 });
-  refreshCurrentImage();
-  updateHistoryStats();
+  try {
+    await invoke('rotate_image', { path: state.currentPath, degrees: 90 });
+    refreshCurrentImage();
+    updateHistoryStats();
+  } catch (err) { notify("Rotate failed: " + err); }
 }
 
 async function doUndo() {
   try {
-    const undonePath = await invoke('undo_last_move');
-    if (undonePath) {
-      await loadFiles();
-      refreshCurrentImage();
+    const restoredPath = await invoke('undo_last_move');
+    if (restoredPath) {
+      await loadFiles(restoredPath);
       updateHistoryStats();
     }
-  } catch(err) { console.warn("Undo failed:", err); }
+  } catch (err) { notify("Undo failed: " + err); }
 }
 
 async function doRedo() {
   try {
-    const redonePath = await invoke('redo_last_move');
-    if (redonePath) {
-      await loadFiles();
-      refreshCurrentImage();
+    const restoredPath = await invoke('redo_last_move');
+    if (restoredPath) {
+      await loadFiles(restoredPath);
       updateHistoryStats();
     }
-  } catch(err) { console.warn("Redo failed:", err); }
+  } catch (err) { notify("Redo failed: " + err); }
 }
 
 async function updateHistoryStats() {
@@ -508,14 +538,14 @@ function setupCropDrag() {
 async function executeCrop() {
   const imgRect = el.mainImage.getBoundingClientRect();
   const regionRect = el.cropRegion.getBoundingClientRect();
-  
+
+  // getBoundingClientRect already includes the zoom transform, so this scale
+  // (image pixels per displayed pixel) is correct at any currentZoom.
   const scale = imgRect.width / el.mainImage.naturalWidth;
-  
-  let relativeX = regionRect.left - imgRect.left;
-  let relativeY = regionRect.top - imgRect.top;
-  
-  const x = Math.round(relativeX / scale);
-  const y = Math.round(relativeY / scale);
+  if (!(scale > 0)) return;
+
+  const x = Math.round((regionRect.left - imgRect.left) / scale);
+  const y = Math.round((regionRect.top - imgRect.top) / scale);
   const w = Math.round(regionRect.width / scale);
   const h = Math.round(regionRect.height / scale);
   
@@ -536,7 +566,7 @@ function renderShortcuts() {
   Object.entries(state.config.hotkeys).forEach(([key, path]) => {
     const li = document.createElement('li');
     li.className = 'shortcut-item';
-    li.innerHTML = `<span class="shortcut-key">${key.toUpperCase()}</span> <span class="shortcut-path">${basename(path)}</span>`;
+    li.innerHTML = `<span class="shortcut-key">${key.toUpperCase()}</span> <span class="shortcut-path">${escapeHtml(basename(path))}</span>`;
     el.shortcutLegend.appendChild(li);
   });
 }

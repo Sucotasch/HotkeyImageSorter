@@ -1,8 +1,8 @@
 use crate::models::AppConfig;
+use directories::ProjectDirs;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use directories::ProjectDirs;
 
 /// Returns the config file path.
 /// Priority: <exe_dir>/config.json (portable) → AppData/config.json

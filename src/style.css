@@ -285,6 +285,28 @@ body, html {
   margin-bottom: 24px;
 }
 
+/* Toast notifications */
+#toast {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 80%;
+  padding: 8px 14px;
+  border-radius: 6px;
+  background: #7f1d1d;
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: pre-line;
+  z-index: 999;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+}
+#toast.error { background: #7f1d1d; }
+#toast:not(:empty) { opacity: 1; }
+
 .hidden { display: none; }
 kbd {
   background: #333;

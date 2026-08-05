@@ -1,116 +1,196 @@
-mod models;
+mod config;
 mod file_ops;
 mod image_proc;
-mod config;
+mod models;
 
-use crate::models::{ImageInfo, AppConfig, UndoAction};
+use crate::models::{AppConfig, ImageInfo, UndoAction, UndoActionType};
 use std::sync::Mutex;
-use tauri::State;
-use tauri::Manager;
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::Manager;
+use tauri::State;
+
+/// Maximum number of undo (and redo) batches kept in memory.
+const MAX_HISTORY: usize = 5;
 
 struct AppState {
     history: Mutex<Vec<Vec<UndoAction>>>,
     redo_history: Mutex<Vec<Vec<UndoAction>>>,
 }
 
+/// Records a completed operation batch: pushes to history, truncates the oldest
+/// batch (deleting its edit backups) and invalidates any pending redo actions.
+fn push_history(state: &AppState, batch: Vec<UndoAction>) {
+    let mut history = state.history.lock().unwrap();
+    history.push(batch);
+    if history.len() > MAX_HISTORY {
+        let removed_batch = history.remove(0);
+        for removed in removed_batch {
+            if removed.action_type == UndoActionType::Edit {
+                let _ = std::fs::remove_file(&removed.new_path);
+            }
+        }
+    }
+    let mut redo = state.redo_history.lock().unwrap();
+    for action in redo.drain(..).flatten() {
+        if action.action_type == UndoActionType::Edit {
+            let _ = std::fs::remove_file(&action.new_path);
+        }
+    }
+}
+
+/// Truncates `redo` to MAX_HISTORY, deleting edit backups of dropped batches.
+fn cap_redo(redo: &mut Vec<Vec<UndoAction>>) {
+    while redo.len() > MAX_HISTORY {
+        let removed_batch = redo.remove(0);
+        for removed in removed_batch {
+            if removed.action_type == UndoActionType::Edit {
+                let _ = std::fs::remove_file(&removed.new_path);
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn list_files(dir: String) -> Result<Vec<ImageInfo>, String> {
+    if !std::path::Path::new(&dir).is_dir() {
+        return Err(format!("Folder not found or not a directory: {dir}"));
+    }
     Ok(file_ops::list_images(&dir))
 }
 
 #[tauri::command]
-async fn move_images(sources: Vec<String>, target_dir: String, state: State<'_, AppState>) -> Result<Vec<String>, String> {
+async fn move_images(
+    sources: Vec<String>,
+    target_dir: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
     let mut batch = Vec::new();
     let mut new_paths = Vec::new();
-    
+    let mut failures = Vec::new();
+
     for source in sources {
-        if let Ok(new_path) = file_ops::move_image(&source, &target_dir) {
-            batch.push(UndoAction {
-                old_path: source,
-                new_path: new_path.clone(),
-                action_type: "move".to_string(),
-            });
-            new_paths.push(new_path);
+        match file_ops::move_image(&source, &target_dir) {
+            Ok(new_path) => {
+                batch.push(UndoAction {
+                    old_path: source,
+                    new_path: new_path.clone(),
+                    action_type: UndoActionType::Move,
+                });
+                new_paths.push(new_path);
+            }
+            Err(e) => failures.push(format!("{source}: {e}")),
         }
     }
-    
+
+    // Successful moves must remain undoable even when some files failed.
     if !batch.is_empty() {
-        let mut history = state.history.lock().unwrap();
-        history.push(batch);
-        if history.len() > 5 {
-            let removed_batch = history.remove(0);
-            for removed in removed_batch {
-                if removed.action_type == "edit" {
-                    let _ = std::fs::remove_file(&removed.new_path);
-                }
-            }
-        }
-        
-        let mut redo = state.redo_history.lock().unwrap();
-        for batch in redo.drain(..) {
-            for action in batch {
-                if action.action_type == "edit" {
-                    let _ = std::fs::remove_file(&action.new_path);
-                }
-            }
-        }
+        push_history(&state, batch);
     }
-    
+
+    if !failures.is_empty() {
+        return Err(format!(
+            "Failed to move some files:\n{}",
+            failures.join("\n")
+        ));
+    }
+
     Ok(new_paths)
 }
 
 #[tauri::command]
-async fn undo_last_move(state: State<'_, AppState>) -> Result<bool, String> {
+async fn undo_last_move(state: State<'_, AppState>) -> Result<Option<String>, String> {
     let mut history = state.history.lock().unwrap();
-    if let Some(mut last_batch) = history.pop() {
-        let mut redo = state.redo_history.lock().unwrap();
-        let mut redo_batch = Vec::new();
-        
-        // Reverse iterate to undo in opposite order
-        while let Some(last_action) = last_batch.pop() {
-            if last_action.action_type == "move" {
-                let _ = std::fs::rename(&last_action.new_path, &last_action.old_path);
-                redo_batch.push(last_action);
-            } else if last_action.action_type == "edit" {
-                let _ = swap_edit(&last_action);
-                redo_batch.push(last_action);
+    let Some(mut last_batch) = history.pop() else {
+        return Ok(None);
+    };
+    let mut redo = state.redo_history.lock().unwrap();
+    let mut redo_batch = Vec::new();
+    let mut restored: Option<String> = None;
+    let mut failure: Option<String> = None;
+
+    // Reverse iterate to undo in opposite order
+    while let Some(action) = last_batch.pop() {
+        match action.action_type {
+            UndoActionType::Move => {
+                if std::fs::rename(&action.new_path, &action.old_path).is_ok() {
+                    restored = Some(action.old_path.clone());
+                } else if failure.is_none() {
+                    failure = Some(format!("Failed to restore {}", action.old_path));
+                }
+                redo_batch.push(action);
+            }
+            UndoActionType::Edit => {
+                if swap_edit(&action).is_ok() {
+                    restored = Some(action.old_path.clone());
+                } else if failure.is_none() {
+                    failure = Some(format!("Failed to undo edit on {}", action.old_path));
+                }
+                redo_batch.push(action);
             }
         }
-        redo_batch.reverse(); // restore forward direction for redo
-        redo.push(redo_batch);
-        return Ok(true);
     }
-    Err("No more actions to undo".to_string())
+    redo_batch.reverse(); // restore forward direction for redo
+    redo.push(redo_batch);
+    cap_redo(&mut redo);
+
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    Ok(restored)
 }
 
 #[tauri::command]
-async fn redo_last_move(state: State<'_, AppState>) -> Result<bool, String> {
+async fn redo_last_move(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    // Lock order: history before redo_history, matching every other command
+    // (prevents the AB-BA deadlock between undo and redo).
+    let mut history = state.history.lock().unwrap();
     let mut redo = state.redo_history.lock().unwrap();
-    if let Some(action_batch) = redo.pop() {
-        let mut history = state.history.lock().unwrap();
-        let mut history_batch = Vec::new();
-        
-        for action in action_batch {
-            if action.action_type == "move" {
-                let _ = std::fs::rename(&action.old_path, &action.new_path);
+    let Some(action_batch) = redo.pop() else {
+        return Ok(None);
+    };
+    let mut history_batch = Vec::new();
+    let mut restored: Option<String> = None;
+    let mut failure: Option<String> = None;
+
+    for action in action_batch {
+        match action.action_type {
+            UndoActionType::Move => {
+                if std::fs::rename(&action.old_path, &action.new_path).is_ok() {
+                    restored = Some(action.new_path.clone());
+                } else if failure.is_none() {
+                    failure = Some(format!("Failed to redo move of {}", action.old_path));
+                }
                 history_batch.push(action);
-            } else if action.action_type == "edit" {
-                let _ = swap_edit(&action);
+            }
+            UndoActionType::Edit => {
+                if swap_edit(&action).is_ok() {
+                    restored = Some(action.old_path.clone());
+                } else if failure.is_none() {
+                    failure = Some(format!("Failed to redo edit on {}", action.old_path));
+                }
                 history_batch.push(action);
             }
         }
-        history.push(history_batch);
-        return Ok(true);
     }
-    Err("No more actions to redo".to_string())
+    history.push(history_batch);
+
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    Ok(restored)
 }
 
 #[tauri::command]
 async fn get_history_stats(state: State<'_, AppState>) -> Result<(usize, usize), String> {
-    let undo_count = state.history.lock().unwrap().len();
-    let redo_count = state.redo_history.lock().unwrap().len();
+    let undo_count = state.history.lock().unwrap().iter().map(|b| b.len()).sum();
+    let redo_count = state
+        .redo_history
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| b.len())
+        .sum();
     Ok((undo_count, redo_count))
 }
 
@@ -118,7 +198,10 @@ fn backup_file(path: &str) -> Result<String, String> {
     let old_path = std::path::Path::new(path);
     let tmp = std::env::temp_dir();
     let ext = old_path.extension().unwrap_or_default();
-    let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros();
     let backup_path = tmp.join(format!("img_bak_{}.{}", id, ext.to_string_lossy()));
     std::fs::copy(old_path, &backup_path).map_err(|e| e.to_string())?;
     Ok(backup_path.to_string_lossy().to_string())
@@ -135,52 +218,43 @@ fn swap_edit(action: &UndoAction) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn rotate_image(path: String, degrees: i32, state: State<'_, AppState>) -> Result<(), String> {
+async fn rotate_image(
+    path: String,
+    degrees: i32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let backup = backup_file(&path)?;
     image_proc::rotate_image(&path, degrees)?;
-    let mut history = state.history.lock().unwrap();
-    history.push(vec![UndoAction { old_path: path.clone(), new_path: backup, action_type: "edit".to_string() }]);
-    if history.len() > 5 {
-        let removed_batch = history.remove(0);
-        for removed in removed_batch {
-            if removed.action_type == "edit" {
-                let _ = std::fs::remove_file(&removed.new_path);
-            }
-        }
-    }
-    let mut redo = state.redo_history.lock().unwrap();
-    for batch in redo.drain(..) {
-        for action in batch {
-            if action.action_type == "edit" {
-                let _ = std::fs::remove_file(&action.new_path);
-            }
-        }
-    }
+    push_history(
+        &state,
+        vec![UndoAction {
+            old_path: path.clone(),
+            new_path: backup,
+            action_type: UndoActionType::Edit,
+        }],
+    );
     Ok(())
 }
 
 #[tauri::command]
-async fn crop_image(path: String, x: u32, y: u32, width: u32, height: u32, state: State<'_, AppState>) -> Result<(), String> {
+async fn crop_image(
+    path: String,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let backup = backup_file(&path)?;
     image_proc::crop_image(&path, x, y, width, height)?;
-    let mut history = state.history.lock().unwrap();
-    history.push(vec![UndoAction { old_path: path.clone(), new_path: backup, action_type: "edit".to_string() }]);
-    if history.len() > 5 {
-        let removed_batch = history.remove(0);
-        for removed in removed_batch {
-            if removed.action_type == "edit" {
-                let _ = std::fs::remove_file(&removed.new_path);
-            }
-        }
-    }
-    let mut redo = state.redo_history.lock().unwrap();
-    for batch in redo.drain(..) {
-        for action in batch {
-            if action.action_type == "edit" {
-                let _ = std::fs::remove_file(&action.new_path);
-            }
-        }
-    }
+    push_history(
+        &state,
+        vec![UndoAction {
+            old_path: path.clone(),
+            new_path: backup,
+            action_type: UndoActionType::Edit,
+        }],
+    );
     Ok(())
 }
 
@@ -218,7 +292,7 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .menu_on_left_click(false)
+                .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "quit" => app.exit(0),
                     "show" => {
@@ -229,25 +303,24 @@ pub fn run() {
                     }
                     _ => {}
                 })
-                .on_tray_icon_event(|tray, event| match event {
-                    TrayIconEvent::Click {
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         ..
-                    } => {
+                    } = event
+                    {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
                     }
-                    _ => {}
                 })
                 .build(app)?;
 
             Ok(())
         })
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
@@ -255,7 +328,6 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState {
             history: Mutex::new(Vec::new()),
@@ -279,20 +351,21 @@ pub fn run() {
                 let minimize = config::get_config().minimize_to_tray.unwrap_or(true);
                 if minimize {
                     api.prevent_close();
-                    window.hide().unwrap();
+                    let _ = window.hide();
                 }
             }
             if let tauri::WindowEvent::Destroyed = event {
-                // Clean up any temp backup files left in the undo history
+                // Clean up any temp backup files left in the undo/redo history
                 if let Some(state) = window.try_state::<AppState>() {
-                    let history = state.history.lock().unwrap();
-                    for batch in history.iter() {
-                        for action in batch {
-                            if action.action_type == "edit" {
+                    let cleanup = |batches: &[Vec<UndoAction>]| {
+                        for action in batches.iter().flatten() {
+                            if action.action_type == UndoActionType::Edit {
                                 let _ = std::fs::remove_file(&action.new_path);
                             }
                         }
-                    }
+                    };
+                    cleanup(&state.history.lock().unwrap());
+                    cleanup(&state.redo_history.lock().unwrap());
                 }
             }
         })
@@ -318,7 +391,7 @@ mod tests {
         let action = UndoAction {
             old_path: real.to_string_lossy().into_owned(),
             new_path: backup.to_string_lossy().into_owned(),
-            action_type: "edit".to_string(),
+            action_type: UndoActionType::Edit,
         };
 
         // Undo: live file is replaced by the pre-edit backup, edited copy goes to temp
@@ -340,7 +413,7 @@ mod tests {
         let action = UndoAction {
             old_path: real.to_string_lossy().into_owned(),
             new_path: backup.to_string_lossy().into_owned(),
-            action_type: "edit".to_string(),
+            action_type: UndoActionType::Edit,
         };
         assert!(swap_edit(&action).is_err());
     }

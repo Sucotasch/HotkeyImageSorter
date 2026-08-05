@@ -1,11 +1,15 @@
-use std::path::Path;
 use crate::models::ImageInfo;
 use jwalk::WalkDir;
+use std::path::Path;
 use std::time::SystemTime;
 
 pub fn list_images(dir_path: &str) -> Vec<ImageInfo> {
     let mut images = Vec::new();
-    let extensions = ["jpg", "jpeg", "png", "webp", "jif"];
+    // Formats decodable by the `image` crate with its default features.
+    // (No AVIF: the `dav1d` decoder is not enabled in this build; ravif only encodes.)
+    let extensions = [
+        "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "ico",
+    ];
 
     for entry in WalkDir::new(dir_path)
         .max_depth(1)
@@ -51,8 +55,14 @@ pub fn move_image(source: &str, target_dir: &str) -> Result<String, String> {
 
     // Auto-rename if exists
     let mut count = 1;
-    let stem = source_path.file_stem().ok_or("Invalid file stem")?.to_string_lossy();
-    let ext = source_path.extension().ok_or("Invalid extension")?.to_string_lossy();
+    let stem = source_path
+        .file_stem()
+        .ok_or("Invalid file stem")?
+        .to_string_lossy();
+    let ext = source_path
+        .extension()
+        .ok_or("Invalid extension")?
+        .to_string_lossy();
 
     while target_path.exists() {
         let new_name = format!("{}_{}.{}", stem, count, ext);
@@ -61,7 +71,7 @@ pub fn move_image(source: &str, target_dir: &str) -> Result<String, String> {
     }
 
     std::fs::rename(source_path, &target_path).map_err(|e| e.to_string())?;
-    
+
     Ok(target_path.to_string_lossy().to_string())
 }
 

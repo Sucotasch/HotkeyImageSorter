@@ -414,6 +414,8 @@ Only push the action into redo/history when the swap fully succeeded.
 | L19 | No CI, no JS lint/typecheck, no `.editorconfig` | Add a minimal GitHub Actions workflow (`cargo check` + `cargo test` + `npm ci`) |
 | L20 | `output.txt`-style redirection in `package.json`/docs uses PowerShell syntax (`2>&1 > file`) in some places | N/A to code; docs only |
 | L21 | **Repo is not rustfmt-clean** — `cargo fmt --check` exits 1: unordered imports in `config.rs`/`file_ops.rs`/`lib.rs`, long lines unwrapped, trailing whitespace throughout `lib.rs` | Run `cargo fmt` (safe, zero behavior change) and add a CI check |
+
+> **M1 correction:** the audit's original M1 claim was a **false positive**. It stated `executeCrop` derives `scale` from the *untransformed* rect; in fact `getBoundingClientRect()` already includes the `transform: scale(...)` (zoom), so `imgRect.width / naturalWidth` is correct at any zoom. The applied fix is therefore only a defensive `scale > 0` guard. See §11 for the full status.
 | L22 | Clippy `single_match` at `lib.rs:228` — the tray `match` has exactly one meaningful arm plus `_ => {}` | Replace with `if let`:
 
 ```rust
@@ -530,7 +532,49 @@ Note: `AppConfig` currently has no `Default` impl (fields use `#[serde(default)]
 - The 5-batch history cap is intentional (memory bound); suggestions preserve it unless noted.
 - Review is advisory only — per `ReviewPrompt.txt`, no code was modified.
 
-## 10. Suggested fix order
+## 10. Fix implementation status
+
+All fixes below were applied and validated in the follow-up round: `cargo fmt --check` ✅, `cargo test` 10/10 ✅, `cargo build` ✅, `cargo clippy --all-targets` **0 warnings** ✅, `npm test` 7/7 ✅.
+
+| ID | Status | Notes |
+|----|--------|-------|
+| H1 | ✅ Fixed | `app.js`: editable-element guard extended to INPUT/SELECT/TEXTAREA/contenteditable; A–Z hotkeys and Delete now require no modifiers and a closed settings modal |
+| H2 | ✅ Fixed (minimal) | `redo_last_move` locks `history` → `redo_history`, matching all other commands (no AB-BA inversion) |
+| H3 | ✅ Fixed | `move_images` collects per-file failures and returns `Err`; successful moves are still recorded in undo history; frontend shows a toast |
+| H4 | ✅ Fixed | `crop_image` clamps coordinates to image bounds (also removed the unused `mut`) |
+| H5 | ✅ Fixed (minimal) | redo capped at `MAX_HISTORY` (5) with backup cleanup; `Destroyed` handler now cleans redo backups too |
+| H6 | ✅ Fixed | `undo_last_move`/`redo_last_move` return `Option<String>` (restored path); `push_history` centralizes cap + redo-invalidation; frontend `doUndo`/`doRedo` select the restored file |
+| H7 | ⚠️ Partially | 5-batch cap kept (user chose the minimal approach); crash-leftover temp cleanup stays a remaining concern |
+| M1 | ✅ Corrected | False positive (see note above); added defensive `scale > 0` guard — crop already works at any zoom |
+| M2 | ✅ Fixed | `notify()` toast wired into move/delete/rotate/undo/redo/loadFiles error paths |
+| M3 | ✅ Fixed | `list_files` validates the folder exists; frontend shows a toast on failure |
+| M4 | ✅ Fixed | Extensions: `jpg/jpeg/png/gif/webp/bmp/tif/tiff/ico`; **AVIF excluded** (no `dav1d` decoder in this build, verified via `cargo tree`) |
+| M5 | ✅ Fixed | undo/redo surface rename failures as `Err` instead of silently ignoring them |
+| M6 | ✅ Minimal | `sortAndRender` skips DOM rebuild when the list signature is unchanged |
+| L1 | ✅ Fixed | `show_menu_on_left_click(false)` |
+| L2 | ✅ Fixed | unused `mut` removed |
+| L3 | ✅ Fixed | `src/main.js`, `src/styles.css`, `src/assets/*` deleted |
+| L4 | ✅ Fixed | `src-tauri/output*.txt` deleted; `output*.txt` added to `src-tauri/.gitignore` |
+| L5 | ✅ N/A | already covered by the `/target/` ignore |
+| L6 | ✅ Fixed | `chrono` removed from Cargo.toml |
+| L7 | ✅ Fixed | `tauri-plugin-fs`, `tauri-plugin-opener` removed (Cargo.toml, lib.rs, capabilities) |
+| L8 | ✅ Fixed | unused npm deps removed; `package.json` renamed |
+| L9 | ⏭️ Deferred | version pin style left as-is (cosmetic) |
+| L10 | ✅ Fixed | `escapeHtml` added to `utils.js` and used in `renderShortcuts`; tests added |
+| L11 | ✅ Fixed | `let _ = window.hide()` |
+| L12 | ✅ Fixed | renamed to **HotkeyImageSorter** (productName, window title, Cargo package, package.json) |
+| L13 | ✅ Fixed | `UndoActionType` enum replaces the free string |
+| L14 | ✅ Fixed | `get_history_stats` counts actions, not batches |
+| L15 | ⏭️ Deferred | config saved on every navigation (minor perf; behavior kept) |
+| L16 | ⏭️ Deferred | `ru-RU` locale left as-is |
+| L17 | ⏭️ Deferred | Google Fonts kept (would require bundling a binary font) |
+| L18 | ⏭️ Deferred | window-state permission not needed (JS API unused) |
+| L19 | ✅ Fixed | `.github/workflows/ci.yml` (fmt/check/clippy/test + npm test) |
+| L20 | ⏭️ N/A | docs only |
+| L21 | ✅ Fixed | `cargo fmt` applied; `cargo fmt --check` passes |
+| L22 | ✅ Fixed | tray `match` → `if let` (clippy is now clean) |
+
+## 11. Suggested fix order
 
 1. **H1** (destructive hotkey bug) — 5-minute fix, prevents data misplacement.
 2. **H3 + M2** (silent failures + user feedback).

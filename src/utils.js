@@ -4,3 +4,13 @@
 export function basename(path) {
   return path.split(/[\\/]/).pop();
 }
+
+export function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[c]);
+}
