@@ -607,6 +607,15 @@ All fixes below were applied and validated in the follow-up round: `cargo fmt --
 
 **Verification:** `npm test` 14/14 ✅, `node --check` ✅, release rebuilt.
 
+**Fullscreen mode** (feature request: no fullscreen existed). Added native window fullscreen toggle (`window.__TAURI__.window` `isFullscreen`/`setFullscreen`) with three triggers:
+1. **Double-click the image** (no conflict with crop: the overlay intercepts dblclicks while crop is active).
+2. **Double-click the file name** (with a `title` hint).
+3. **Enter** (guarded: settings modal closed, focus not on a `BUTTON` so native button activation isn't double-fired).
+
+Plus: **Escape now exits fullscreen first** (only hides to tray when not fullscreen), with failures surfaced via toast instead of silently hiding the window. Added `core:window:allow-set-fullscreen` + `core:window:allow-is-fullscreen` to `capabilities/default.json` (mutation commands aren't in `core:default`). Commands panel updated with the `Enter` hint. Reviewed — no issues found.
+
+**Verification:** `node --check` ✅, `npm test` 14/14 ✅, release rebuilt.
+
 ## 12. Suggested fix order
 
 1. **H1** (destructive hotkey bug) — 5-minute fix, prevents data misplacement.

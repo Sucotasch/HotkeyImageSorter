@@ -135,6 +135,10 @@ function setupEventListeners() {
     sortAndRender();
   });
 
+  // Fullscreen: double-click the image or the file name
+  el.mainImage.addEventListener('dblclick', toggleFullscreen);
+  el.filePath.addEventListener('dblclick', toggleFullscreen);
+
   // Crop Interaction
   setupCropDrag();
   el.cropRegion.addEventListener('dblclick', (e) => {
@@ -336,6 +340,14 @@ async function handleGlobalKeydown(e) {
       toggleCrop();
     } else if (!el.modalSettings.classList.contains('hidden')) {
       toggleSettings();
+    } else if (await isFullscreenActive()) {
+      // Exit fullscreen first; surface failures instead of hiding the window
+      try {
+        const win = window.__TAURI__.window.getCurrentWindow();
+        await win.setFullscreen(false);
+      } catch (err) {
+        notify("Failed to exit fullscreen: " + err);
+      }
     } else {
       invoke('hide_window');
     }
@@ -399,6 +411,9 @@ async function handleGlobalKeydown(e) {
   } else if (e.ctrlKey && (code === 'KeyX' || key === 'x')) {
     e.preventDefault();
     await doRedo();
+  } else if ((key === 'enter' || code === 'Enter') && !(active && active.tagName === 'BUTTON') && el.modalSettings.classList.contains('hidden')) {
+    e.preventDefault();
+    await toggleFullscreen();
   } else if (code && code.startsWith('Key') && !e.ctrlKey && !e.metaKey && !e.altKey && el.modalSettings.classList.contains('hidden')) {
     const char = code.replace('Key', '').toLowerCase();
     const targetDir = state.config.hotkeys[char];
@@ -494,6 +509,25 @@ function refreshCurrentImage() {
   // Add cache buster to URL
   const src = window.__TAURI__.core.convertFileSrc(state.currentPath);
   el.mainImage.src = src + '?t=' + Date.now();
+}
+
+// Toggle native window fullscreen (dbl-click image/file name, or Enter)
+async function toggleFullscreen() {
+  try {
+    const win = window.__TAURI__.window.getCurrentWindow();
+    await win.setFullscreen(!(await win.isFullscreen()));
+  } catch (err) {
+    notify("Fullscreen failed: " + err);
+  }
+}
+
+async function isFullscreenActive() {
+  try {
+    return await window.__TAURI__.window.getCurrentWindow().isFullscreen();
+  } catch (err) {
+    console.warn("Failed to read fullscreen state:", err);
+    return false;
+  }
 }
 
 // Crop Logic
