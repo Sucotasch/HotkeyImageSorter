@@ -3,13 +3,16 @@ use jwalk::WalkDir;
 use std::path::Path;
 use std::time::SystemTime;
 
+/// Extensions accepted by the image list (and enforced on rename so a file
+/// can't be renamed into a format the app no longer lists). Decodable by the
+/// `image` crate with its default features. (No AVIF: the `dav1d` decoder is
+/// not enabled in this build; ravif only encodes.)
+const SUPPORTED_EXTENSIONS: [&str; 9] = [
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "ico",
+];
+
 pub fn list_images(dir_path: &str) -> Vec<ImageInfo> {
     let mut images = Vec::new();
-    // Formats decodable by the `image` crate with its default features.
-    // (No AVIF: the `dav1d` decoder is not enabled in this build; ravif only encodes.)
-    let extensions = [
-        "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "ico",
-    ];
 
     for entry in WalkDir::new(dir_path)
         .max_depth(1)
@@ -19,7 +22,7 @@ pub fn list_images(dir_path: &str) -> Vec<ImageInfo> {
         if entry.file_type().is_file() {
             let path = entry.path();
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if extensions.contains(&ext.to_lowercase().as_str()) {
+                if SUPPORTED_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
                     let metadata = entry.metadata().ok();
                     let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
                     let modified = metadata
@@ -80,6 +83,26 @@ pub fn copy_with_retry(from: &Path, to: &Path) -> Result<(), String> {
     Err(last_err)
 }
 
+/// Removes a file, retrying briefly to survive transient locks. A missing file
+/// counts as success (it's already gone). Used by the cross-volume move
+/// fallback after the copy succeeded.
+pub fn remove_with_retry(path: &Path) -> Result<(), String> {
+    let mut last_err = String::from("unknown error");
+    for attempt in 0..8 {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt < 7 {
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
 /// Renames `source` in place. `new_name` must be a bare file name (no path
 /// separators). If the typed name has no extension, the original extension is
 /// kept so the file stays listable as an image. Fails on collision instead of
@@ -110,18 +133,35 @@ pub fn rename_file(source: &str, new_name: &str) -> Result<String, String> {
         }
     }
 
+    // Refuse extensions the app wouldn't list, so the renamed file can't
+    // silently vanish from the image list.
+    let final_ext = Path::new(&final_name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .ok_or_else(|| "File name must keep an image extension".to_string())?;
+    if !SUPPORTED_EXTENSIONS.contains(&final_ext.as_str()) {
+        return Err(format!(
+            "Extension \".{}\" is not a supported image format",
+            final_ext
+        ));
+    }
+
     let target = parent.join(&final_name);
     // Case-only renames (Pic.jpg → pic.jpg) are a no-op on Windows — compare
     // against the SOURCE file name, not the target (which always matches).
-    let same_name = target == source_path
-        || source_path
-            .file_name()
-            .map(|n| n.to_string_lossy().eq_ignore_ascii_case(&final_name))
-            .unwrap_or(false);
+    // On case-sensitive platforms a case-only rename is a real rename.
+    let same_name = if cfg!(windows) {
+        target == source_path
+            || source_path
+                .file_name()
+                .map(|n| n.to_string_lossy().eq_ignore_ascii_case(&final_name))
+                .unwrap_or(false)
+    } else {
+        target == source_path
+    };
     if same_name {
-        // Nothing to do (same name, possibly only differing in case) — report
-        // success with the target path
-        return Ok(target.to_string_lossy().to_string());
+        // Nothing to do — report the actual on-disk name (source casing)
+        return Ok(source_path.to_string_lossy().to_string());
     }
     if target.exists() {
         return Err(format!("A file named \"{}\" already exists", final_name));
@@ -138,9 +178,31 @@ pub fn move_image(source: &str, target_dir: &str) -> Result<String, String> {
     if !target_dir_path.exists() {
         std::fs::create_dir_all(target_dir_path).map_err(|e| e.to_string())?;
     }
+    if !target_dir_path.is_dir() {
+        return Err(format!("Target is not a directory: {target_dir}"));
+    }
+
+    // Moving into the folder the file already lives in (e.g. a hotkey pointing
+    // at the source folder) is a no-op — never auto-rename the file next to
+    // itself. Compare canonicalized paths so drive-letter case differences on
+    // Windows don't defeat the check.
+    let same_dir = source_path
+        .parent()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|sp| {
+            target_dir_path
+                .canonicalize()
+                .ok()
+                .map(|tp| sp == tp)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if same_dir {
+        return Ok(source_path.to_string_lossy().to_string());
+    }
 
     let file_name = source_path.file_name().ok_or("Invalid filename")?;
-    let mut target_path = target_dir_path.join(file_name);
+    let base_target = target_dir_path.join(file_name);
 
     // Auto-rename if exists
     let mut count = 1;
@@ -152,14 +214,35 @@ pub fn move_image(source: &str, target_dir: &str) -> Result<String, String> {
         .extension()
         .ok_or("Invalid extension")?
         .to_string_lossy();
-
+    let mut target_path = base_target;
     while target_path.exists() {
         let new_name = format!("{}_{}.{}", stem, count, ext);
         target_path = target_dir_path.join(new_name);
         count += 1;
     }
 
-    rename_with_retry(source_path, &target_path)?;
+    // rename first (fast, same volume). Only when the failure is genuinely a
+    // cross-device move (e.g. C: → D:) fall back to copy+delete — a plain
+    // rename fails there with "not the same volume" on Windows / EXDEV.
+    match std::fs::rename(source_path, &target_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+            copy_with_retry(source_path, &target_path)?;
+            if let Err(e) = remove_with_retry(source_path) {
+                // The file IS in the target, but the source copy couldn't be
+                // removed — never hide a potential duplicate.
+                return Err(format!(
+                    "Moved to {} but could not remove the original: {e}",
+                    target_path.display()
+                ));
+            }
+        }
+        Err(_) => {
+            // Not cross-device: transient lock, permission, etc. Retry, then
+            // surface the real error.
+            rename_with_retry(source_path, &target_path)?;
+        }
+    }
 
     Ok(target_path.to_string_lossy().to_string())
 }
@@ -318,5 +401,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.jpg");
         assert!(rename_file(missing.to_str().unwrap(), "new.jpg").is_err());
+    }
+
+    #[test]
+    fn rename_file_rejects_unsupported_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("pic.jpg");
+        fs::write(&src, b"data").unwrap();
+        assert!(rename_file(src.to_str().unwrap(), "pic.txt").is_err());
+        assert!(src.exists(), "source untouched on rejected extension");
+    }
+
+    #[test]
+    fn move_image_into_its_own_folder_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("pic.jpg");
+        fs::write(&src, b"data").unwrap();
+
+        let moved = move_image(src.to_str().unwrap(), dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(Path::new(&moved), src);
+        assert!(src.exists());
+        assert!(
+            !dir.path().join("pic_1.jpg").exists(),
+            "must not auto-rename the file next to itself"
+        );
+    }
+
+    #[test]
+    fn remove_with_retry_removes_and_tolerates_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        fs::write(&f, b"x").unwrap();
+        remove_with_retry(&f).unwrap();
+        assert!(!f.exists());
+        // already gone — counts as success
+        remove_with_retry(&f).unwrap();
     }
 }

@@ -448,7 +448,12 @@ async function handleGlobalKeydown(e) {
             el.mainImage.src = '';
             state.currentPath = '';
         }
-      } catch (err) { notify("Delete failed: " + err); }
+      } catch (err) {
+        notify("Delete failed: " + err);
+        // Some files may have been trashed — reflect the real state on disk,
+        // keeping focus on the nearest remaining neighbour if possible
+        await loadFiles(successorPath);
+      }
     }
   } else if (e.ctrlKey && (code === 'KeyR' || key === 'r')) {
     await doRotate();
@@ -502,7 +507,13 @@ async function handleGlobalKeydown(e) {
               state.currentPath = '';
             }
             updateHistoryStats();
-        } catch (err) { notify("Move failed: " + err); }
+        } catch (err) {
+            notify("Move failed: " + err);
+            // Some files may have moved — reflect the real state on disk,
+            // keeping focus on the nearest remaining neighbour if possible
+            await loadFiles(successorPath);
+            updateHistoryStats();
+        }
     }
   }
 }

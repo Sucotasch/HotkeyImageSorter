@@ -239,7 +239,9 @@ fn backup_file(path: &str) -> Result<String, String> {
         .unwrap()
         .as_micros();
     let backup_path = tmp.join(format!("img_bak_{}.{}", id, ext.to_string_lossy()));
-    std::fs::copy(old_path, &backup_path).map_err(|e| e.to_string())?;
+    // Copy with retries: right after the image was displayed, the webview (or
+    // antivirus) may still hold a transient read lock on the source file.
+    file_ops::copy_with_retry(old_path, &backup_path)?;
     Ok(backup_path.to_string_lossy().to_string())
 }
 
@@ -320,12 +322,28 @@ async fn save_config(config: AppConfig) -> Result<(), String> {
     config::save_config(config)
 }
 
-#[tauri::command]
-async fn trash_images(paths: Vec<String>) -> Result<(), String> {
+/// Moves the given paths to the system trash, reporting every failure instead
+/// of silently dropping them (a trashed file that never reached the trash bin
+/// is data at risk).
+fn trash_files(paths: Vec<String>) -> Result<(), String> {
+    let mut failures = Vec::new();
     for path in paths {
-        let _ = trash::delete(&path);
+        if let Err(e) = trash::delete(&path) {
+            failures.push(format!("{path}: {e}"));
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!(
+            "Failed to move some files to trash:\n{}",
+            failures.join("\n")
+        ));
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn trash_images(paths: Vec<String>) -> Result<(), String> {
+    trash_files(paths)
 }
 
 #[tauri::command]
@@ -456,6 +474,22 @@ mod tests {
         swap_edit(&action).unwrap();
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "edited");
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "original");
+    }
+
+    #[test]
+    fn trash_files_reports_missing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("pic.jpg");
+        std::fs::write(&existing, b"data").unwrap();
+        let missing = dir.path().join("nope.jpg");
+
+        // The missing path must surface as an error even though one file trashed
+        let result = trash_files(vec![
+            existing.to_string_lossy().into_owned(),
+            missing.to_string_lossy().into_owned(),
+        ]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("nope.jpg"));
     }
 
     #[test]

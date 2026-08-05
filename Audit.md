@@ -624,6 +624,26 @@ Plus: **Escape now exits fullscreen first** (only hides to tray when not fullscr
 
 **Verification:** `cargo test` 20/20 ✅, `cargo fmt --check` ✅, clippy 0 warnings ✅, `node --check` ✅, `npm test` 14/14 ✅, release rebuilt.
 
+## 13. User-scenario hardening (systematic edge-case pass)
+
+Checked the operations the user exercises daily against edge cases; gaps found and fixed:
+
+| Scenario | Before | After |
+|---|---|---|
+| Rename to an existing name | ✅ error toast (already handled) | unchanged — collision never overwrites |
+| Move to a missing target dir | ✅ `create_dir_all` (already handled) | + rejects a target that exists but is a *file* |
+| Move where target has same-name file | ✅ auto-rename `_1`, `_2` (already handled) | unchanged |
+| **Move across volumes (C: → D:)** | ❌ rename fails with "not the same volume", move impossible | copy+delete fallback, used **only** for `ErrorKind::CrossesDevices`; if the source can't be removed after copy, an explicit error is returned (never a silent duplicate) |
+| **Hotkey pointing at the source folder** | ❌ auto-rename created `name_1.jpg` next to the file itself | canonicalized same-dir check → clean no-op |
+| **Rename to a non-image extension (`pic.jpg` → `pic.txt`)** | ❌ file silently vanished from the list | extension whitelist (`SUPPORTED_EXTENSIONS`, shared with `list_images`); renames to other *supported* formats (jpg→png) still allowed |
+| **Trash/delete failures** | ❌ `trash_images` swallowed every error (`let _ =`) — silent no-op, selection wiped | per-path failures surfaced; UI reloads the list in the catch (with the nearest remaining neighbour selected) |
+| **Rotate/crop right after viewing** | ❌ `backup_file` used a bare `std::fs::copy` — transient webview/antivirus lock could fail the backup | `copy_with_retry` |
+| **Partial move failure** | ❌ success toast logic assumed all-or-nothing; UI showed stale list | backend keeps successful moves in undo history and returns `Err` listing failures; UI reloads + refreshes history counts |
+
+**Known remaining gaps (documented, follow-ups):** renames are not undoable (undo covers Move/Edit only — adding a `Rename` variant is the natural fix, and it would also repair the "rename after move breaks the undo chain" case); the cross-volume copy+delete path can't be unit-tested on a single volume (guarded by `CrossesDevices` and reviewed); the 5-batch history cap still drops old edit backups (H7).
+
+New tests: `rename_file_rejects_unsupported_extension`, `move_image_into_its_own_folder_is_a_noop`, `remove_with_retry_removes_and_tolerates_missing`, `trash_files_reports_missing_paths`. **`cargo test` 24/24** ✅, `cargo fmt --check` ✅, clippy 0 warnings ✅, `node --check` ✅, `npm test` 14/14 ✅, release rebuilt.
+
 ## 12. Suggested fix order
 
 1. **H1** (destructive hotkey bug) — 5-minute fix, prevents data misplacement.
