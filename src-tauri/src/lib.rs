@@ -98,13 +98,15 @@ async fn move_images(
     Ok(new_paths)
 }
 
-#[tauri::command]
-async fn undo_last_move(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let mut history = state.history.lock().unwrap();
+/// Undoes the most recent batch. Returns `(restored_path, first_error)`.
+/// The batch is moved to `redo` even on partial failure so no action is lost.
+fn undo_batch(
+    history: &mut Vec<Vec<UndoAction>>,
+    redo: &mut Vec<Vec<UndoAction>>,
+) -> (Option<String>, Option<String>) {
     let Some(mut last_batch) = history.pop() else {
-        return Ok(None);
+        return (None, None);
     };
-    let mut redo = state.redo_history.lock().unwrap();
     let mut redo_batch = Vec::new();
     let mut restored: Option<String> = None;
     let mut failure: Option<String> = None;
@@ -137,22 +139,19 @@ async fn undo_last_move(state: State<'_, AppState>) -> Result<Option<String>, St
     }
     redo_batch.reverse(); // restore forward direction for redo
     redo.push(redo_batch);
-    cap_redo(&mut redo);
+    cap_redo(redo);
 
-    if let Some(e) = failure {
-        return Err(e);
-    }
-    Ok(restored)
+    (restored, failure)
 }
 
-#[tauri::command]
-async fn redo_last_move(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    // Lock order: history before redo_history, matching every other command
-    // (prevents the AB-BA deadlock between undo and redo).
-    let mut history = state.history.lock().unwrap();
-    let mut redo = state.redo_history.lock().unwrap();
+/// Redoes the most recent undone batch. Returns `(restored_path, first_error)`.
+/// The batch is moved back to `history` even on partial failure.
+fn redo_batch(
+    history: &mut Vec<Vec<UndoAction>>,
+    redo: &mut Vec<Vec<UndoAction>>,
+) -> (Option<String>, Option<String>) {
     let Some(action_batch) = redo.pop() else {
-        return Ok(None);
+        return (None, None);
     };
     let mut history_batch = Vec::new();
     let mut restored: Option<String> = None;
@@ -185,6 +184,28 @@ async fn redo_last_move(state: State<'_, AppState>) -> Result<Option<String>, St
     }
     history.push(history_batch);
 
+    (restored, failure)
+}
+
+#[tauri::command]
+async fn undo_last_move(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    // Lock order: history before redo_history, matching every other command.
+    let mut history = state.history.lock().unwrap();
+    let mut redo = state.redo_history.lock().unwrap();
+    let (restored, failure) = undo_batch(&mut history, &mut redo);
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    Ok(restored)
+}
+
+#[tauri::command]
+async fn redo_last_move(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    // Lock order: history before redo_history, matching every other command
+    // (prevents the AB-BA deadlock between undo and redo).
+    let mut history = state.history.lock().unwrap();
+    let mut redo = state.redo_history.lock().unwrap();
+    let (restored, failure) = redo_batch(&mut history, &mut redo);
     if let Some(e) = failure {
         return Err(e);
     }
@@ -442,5 +463,42 @@ mod tests {
             action_type: UndoActionType::Edit,
         };
         assert!(swap_edit(&action).is_err());
+    }
+
+    /// Full rotate→undo→redo cycle through the real batch logic: contents must
+    /// round-trip and history/redo must end up in the expected state.
+    #[test]
+    fn full_edit_cycle_undo_then_redo_restores_contents_and_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("photo.jpg");
+        let backup = dir.path().join("backup.jpg");
+        // State right after rotate_image: live = edited, backup = original
+        write_file(&live, "rotated");
+        write_file(&backup, "original");
+        let action = UndoAction {
+            old_path: live.to_string_lossy().into_owned(),
+            new_path: backup.to_string_lossy().into_owned(),
+            action_type: UndoActionType::Edit,
+        };
+        let mut history: Vec<Vec<UndoAction>> = vec![vec![action]];
+        let mut redo: Vec<Vec<UndoAction>> = Vec::new();
+
+        // Undo
+        let (restored, failure) = undo_batch(&mut history, &mut redo);
+        assert_eq!(failure, None);
+        assert_eq!(restored.as_deref(), Some(live.to_str().unwrap()));
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "original");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "rotated");
+        assert!(history.is_empty(), "undo must drain history");
+        assert_eq!(redo.len(), 1, "undo must populate redo");
+
+        // Redo
+        let (restored, failure) = redo_batch(&mut history, &mut redo);
+        assert_eq!(failure, None);
+        assert_eq!(restored.as_deref(), Some(live.to_str().unwrap()));
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "rotated");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "original");
+        assert!(redo.is_empty(), "redo must drain redo");
+        assert_eq!(history.len(), 1, "redo must restore history");
     }
 }

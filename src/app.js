@@ -240,8 +240,11 @@ async function selectImage(index) {
   state.config.last_file = img.path;
   invoke('save_config', { config: state.config });
   
-  // Use Tauri's convertFileSrc for local images
-  const src = window.__TAURI__.core.convertFileSrc(img.path);
+  // Use Tauri's convertFileSrc for local images. The cache-buster forces the
+  // webview to re-fetch from disk: without it, the same URL (this file was
+  // already displayed before the last rotate/crop/undo/redo) can be served
+  // from the webview cache and undo/redo appear to do nothing.
+  const src = window.__TAURI__.core.convertFileSrc(img.path) + '?t=' + Date.now();
   el.mainImage.src = src;
   el.filePath.textContent = img.path;
   

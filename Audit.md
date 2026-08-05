@@ -585,6 +585,13 @@ All fixes below were applied and validated in the follow-up round: `cargo fmt --
 
 **Verification:** `cargo test` 13/13 ✅, `cargo fmt --check` ✅, `cargo clippy --all-targets` 0 warnings ✅, release rebuilt (`npm run build`).
 
+**Undo works once, redo "does nothing" (rotate).** Follow-up report after the cross-volume fix: undo restored the original but redo appeared to have no effect. Two investigations:
+
+1. **Backend state machine verified correct.** The batch-processing loops were extracted into testable `undo_batch`/`redo_batch` helpers (commands are now thin wrappers), and a new test `full_edit_cycle_undo_then_redo_restores_contents_and_history` runs the entire rotate→undo→redo cycle through the real logic: file contents round-trip (`rotated` → `original` → `rotated`) and history/redo end in the expected state (`history` drained by undo and repopulated by redo). Passes.
+2. **Root cause: stale viewer frame.** `selectImage` sets `el.mainImage.src = convertFileSrc(path)` *without* a cache-buster, while `refreshCurrentImage` (used after rotate/crop) adds `?t=Date.now()`. The asset URL after undo/redo is identical to the one shown before the rotate, so the webview can serve the cached pre-rotate frame: after undo the stale frame happens to be the original (undo "works"), after redo the same stale original is shown again (redo "doesn't work") — even though the file on disk is correctly rotated. **Fix:** `selectImage` now always appends `?t=Date.now()` to the asset URL, so undo/redo (and any revisit of an edited file) always re-fetch from disk.
+
+**Verification:** `cargo test` 14/14 ✅, `cargo fmt --check` ✅, `cargo clippy --all-targets` 0 warnings ✅, `npm test` 7/7 ✅, release rebuilt.
+
 ## 12. Suggested fix order
 
 1. **H1** (destructive hotkey bug) — 5-minute fix, prevents data misplacement.
