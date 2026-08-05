@@ -492,6 +492,7 @@ Note: `AppConfig` currently has no `Default` impl (fields use `#[serde(default)]
 - **10 Rust unit tests** — `cargo test` ✅: `move_image` (move/return path, collision auto-rename without overwrite, creates missing target dir, error on missing source), `config` (save→load round-trip, missing-file defaults, corrupt-file defaults, parent-dir creation), `swap_edit` (undo/redo round-trip, error on missing file). Added `tempfile = "3"` under `[dev-dependencies]`.
 - **4 JS tests** — `npm test` ✅ (`node --test`, zero new deps): `basename` extracted from `app.js` into `src/utils.js` (pure, Tauri-free) and imported back; `npm test` script added.
 - **Supporting refactors** (behavior-preserving): `config.rs` now has path-parameterized `load_config_from` / `save_config_to` / `default_config`; the duplicated edit-swap rename dance in `lib.rs` was extracted into `swap_edit` (used by both undo and redo — they were byte-identical).
+- **Caveat:** `npm test` uses a glob in the `node --test` invocation, which requires **Node ≥ 21** (the README still advertises 18+); on Node 18–20 the glob silently matches nothing. Frontend tests live in `test/` (not `src/`) so they don't ship in the production bundle (`frontendDist` is `../src`).
 
 ---
 

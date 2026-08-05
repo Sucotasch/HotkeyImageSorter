@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { basename } from './utils.js';
+import { basename } from '../src/utils.js';
 
 test('basename extracts the file name from a forward-slash path', () => {
   assert.equal(basename('C:/Users/me/pics/photo.jpg'), 'photo.jpg');
