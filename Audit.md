@@ -603,6 +603,10 @@ All fixes below were applied and validated in the follow-up round: `cargo fmt --
 
 **Verification:** `node --check src/app.js` ✅, `npm test` 7/7 ✅, release rebuilt.
 
+**Crop resize bug — region grows past the image when a west handle is dragged left** (user report). Root cause: the generic clamp clamped `left`/`top` *after* computing `width`/`height`, so when the left edge hit the image edge the width kept its unclamped (larger) value and the rectangle expanded right past the image. **Fix:** the resize math is now edge-based — the edge opposite the dragged handle stays fixed and the size is *derived* from it (`width = fixedRight - left`), so the region shrinks in place and can never overshoot. Extracted as pure `computeResizeRect(img, start, dx, dy, handle, minSize)` in `src/utils.js` (7 new unit tests, including the exact regression: west handle at the image edge → right edge must stay fixed; west/east shrink-to-minSize-in-place; north regression; nw corner). The move clamp `applyCropClamp` was simplified accordingly. Reviewed — no remaining bugs.
+
+**Verification:** `npm test` 14/14 ✅, `node --check` ✅, release rebuilt.
+
 ## 12. Suggested fix order
 
 1. **H1** (destructive hotkey bug) — 5-minute fix, prevents data misplacement.

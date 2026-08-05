@@ -1,4 +1,4 @@
-import { basename, escapeHtml } from './utils.js';
+import { basename, escapeHtml, computeResizeRect } from './utils.js';
 
 const { invoke } = window.__TAURI__.core;
 const { open } = window.__TAURI__.dialog;
@@ -536,15 +536,13 @@ function captureCropFrac() {
   cropFrac.h = r.height / img.height;
 }
 
-// Clamp a viewport-space rect so it stays fully inside the image and never
-// collapses below minSize (also caps it at the image size).
-function applyCropClamp(left, top, width, height, minSize) {
+// Clamp a viewport-space rect (fixed size, e.g. when moving the region) so it
+// stays fully inside the image.
+function applyCropClamp(left, top, width, height) {
   const img = imageRect();
   if (!(img.width > 0 && img.height > 0)) return { left, top, width, height };
-  const minW = Math.min(minSize, img.width);
-  const minH = Math.min(minSize, img.height);
-  width = Math.max(minW, Math.min(width, img.right - left));
-  height = Math.max(minH, Math.min(height, img.bottom - top));
+  width = Math.min(width, img.width);
+  height = Math.min(height, img.height);
   left = Math.max(img.left, Math.min(left, img.right - width));
   top = Math.max(img.top, Math.min(top, img.bottom - height));
   return { left, top, width, height };
@@ -604,8 +602,7 @@ function setupCropDrag() {
       e.clientX - startX,
       e.clientY - startY,
       el.cropRegion.offsetWidth,
-      el.cropRegion.offsetHeight,
-      MIN_SIZE
+      el.cropRegion.offsetHeight
     );
     el.cropRegion.style.left = (clamped.left - ov.left) + 'px';
     el.cropRegion.style.top = (clamped.top - ov.top) + 'px';
@@ -633,15 +630,17 @@ function setupCropDrag() {
       const onMouseMove = (me) => {
         const dx = me.clientX - startX;
         const dy = me.clientY - startY;
-        let left = startL, top = startT, width = startW, height = startH;
-
-        if (handleClass.includes('e')) width = startW + dx;
-        if (handleClass.includes('s')) height = startH + dy;
-        if (handleClass.includes('w')) { width = startW - dx; left = startL + dx; }
-        if (handleClass.includes('n')) { height = startH - dy; top = startT + dy; }
-
-        const clamped = applyCropClamp(left, top, width, height, MIN_SIZE);
+        const img = imageRect();
+        if (!(img.width > 0 && img.height > 0)) return;
         const ov = el.cropOverlay.getBoundingClientRect();
+        const clamped = computeResizeRect(
+          img,
+          { left: startL, top: startT, width: startW, height: startH },
+          dx,
+          dy,
+          handleClass,
+          MIN_SIZE
+        );
         el.cropRegion.style.width = clamped.width + 'px';
         el.cropRegion.style.height = clamped.height + 'px';
         el.cropRegion.style.left = (clamped.left - ov.left) + 'px';
