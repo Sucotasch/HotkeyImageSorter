@@ -62,6 +62,24 @@ pub fn rename_with_retry(from: &Path, to: &Path) -> Result<(), String> {
     Err(last_err)
 }
 
+/// Copies a file, retrying briefly to survive transient locks (same rationale
+/// as `rename_with_retry`). Unlike rename, copy works across volumes.
+pub fn copy_with_retry(from: &Path, to: &Path) -> Result<(), String> {
+    let mut last_err = String::from("unknown error");
+    for attempt in 0..8 {
+        match std::fs::copy(from, to) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt < 7 {
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
 pub fn move_image(source: &str, target_dir: &str) -> Result<String, String> {
     let source_path = Path::new(source);
     let target_dir_path = Path::new(target_dir);
@@ -148,6 +166,17 @@ mod tests {
         let moved = move_image(src.to_str().unwrap(), b.to_str().unwrap()).unwrap();
         assert!(Path::new(&moved).exists());
         assert!(!src.exists());
+    }
+
+    #[test]
+    fn copy_with_retry_copies_and_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.txt");
+        let to = dir.path().join("b.txt");
+        fs::write(&from, b"data").unwrap();
+        fs::write(&to, b"old").unwrap();
+        copy_with_retry(&from, &to).unwrap();
+        assert_eq!(fs::read_to_string(&to).unwrap(), "data");
     }
 
     #[test]

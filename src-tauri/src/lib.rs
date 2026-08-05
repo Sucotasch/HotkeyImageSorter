@@ -219,21 +219,28 @@ fn backup_file(path: &str) -> Result<String, String> {
 
 /// Swaps the contents of `old_path` (live file) and `new_path` (temp backup).
 /// Used identically by both undo and redo for edit actions.
+///
+/// Uses copies instead of renames: the backup lives in the system temp dir,
+/// which is often on a different volume than the image (e.g. C: vs D:), and
+/// Windows rejects cross-volume renames. Copies work across volumes.
 fn swap_edit(action: &UndoAction) -> Result<(), String> {
     let tmp = format!("{}_tmp", action.new_path);
-    file_ops::rename_with_retry(
-        std::path::Path::new(&action.old_path),
-        std::path::Path::new(&tmp),
-    )?;
-    file_ops::rename_with_retry(
-        std::path::Path::new(&action.new_path),
-        std::path::Path::new(&action.old_path),
-    )?;
-    file_ops::rename_with_retry(
-        std::path::Path::new(&tmp),
-        std::path::Path::new(&action.new_path),
-    )?;
-    Ok(())
+    let result = (|| {
+        file_ops::copy_with_retry(
+            std::path::Path::new(&action.old_path),
+            std::path::Path::new(&tmp),
+        )?;
+        file_ops::copy_with_retry(
+            std::path::Path::new(&action.new_path),
+            std::path::Path::new(&action.old_path),
+        )?;
+        file_ops::copy_with_retry(
+            std::path::Path::new(&tmp),
+            std::path::Path::new(&action.new_path),
+        )
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
 }
 
 #[tauri::command]
