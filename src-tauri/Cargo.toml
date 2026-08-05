@@ -25,9 +25,15 @@ tauri-plugin-window-state = "2.4.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jwalk = "0.8"
-image = "0.25"
+image = { version = "0.25", features = ["avif", "avif-native"] }
 directories = "5"
 trash = "5.2.5"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Vendored dav1d-sys with a patched build.rs that disables the bundled
+# tools/tests (their resource compiler breaks when the build path contains
+# spaces on Windows) and checks command exit codes.
+[patch.crates-io]
+dav1d-sys = { path = "vendor/dav1d-sys" }

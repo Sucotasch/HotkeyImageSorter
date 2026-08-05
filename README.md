@@ -54,6 +54,7 @@ The application supports the formats decodable by its image backend:
 - GIF
 - BMP
 - WebP
+- AVIF
 - TIFF/TIF
 - ICO
 
@@ -615,6 +616,7 @@ Contributions are welcome! Please read our contributing guidelines before submit
 - GIF
 - BMP
 - WebP
+- AVIF
 - TIFF/TIF
 - ICO
 
