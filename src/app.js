@@ -434,7 +434,12 @@ async function doUndo() {
       await loadFiles(restoredPath);
       updateHistoryStats();
     }
-  } catch (err) { notify("Undo failed: " + err); }
+  } catch (err) {
+    notify("Undo failed: " + err);
+    // Some actions may still have been undone — reflect the real state on disk
+    await loadFiles();
+    updateHistoryStats();
+  }
 }
 
 async function doRedo() {
@@ -444,7 +449,12 @@ async function doRedo() {
       await loadFiles(restoredPath);
       updateHistoryStats();
     }
-  } catch (err) { notify("Redo failed: " + err); }
+  } catch (err) {
+    notify("Redo failed: " + err);
+    // Some actions may still have been redone — reflect the real state on disk
+    await loadFiles();
+    updateHistoryStats();
+  }
 }
 
 async function updateHistoryStats() {
