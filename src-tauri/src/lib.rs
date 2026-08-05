@@ -113,7 +113,12 @@ async fn undo_last_move(state: State<'_, AppState>) -> Result<Option<String>, St
     while let Some(action) = last_batch.pop() {
         match action.action_type {
             UndoActionType::Move => {
-                if std::fs::rename(&action.new_path, &action.old_path).is_ok() {
+                let ok = file_ops::rename_with_retry(
+                    std::path::Path::new(&action.new_path),
+                    std::path::Path::new(&action.old_path),
+                )
+                .is_ok();
+                if ok {
                     restored = Some(action.old_path.clone());
                 } else if failure.is_none() {
                     failure = Some(format!("Failed to restore {}", action.old_path));
@@ -156,7 +161,12 @@ async fn redo_last_move(state: State<'_, AppState>) -> Result<Option<String>, St
     for action in action_batch {
         match action.action_type {
             UndoActionType::Move => {
-                if std::fs::rename(&action.old_path, &action.new_path).is_ok() {
+                let ok = file_ops::rename_with_retry(
+                    std::path::Path::new(&action.old_path),
+                    std::path::Path::new(&action.new_path),
+                )
+                .is_ok();
+                if ok {
                     restored = Some(action.new_path.clone());
                 } else if failure.is_none() {
                     failure = Some(format!("Failed to redo move of {}", action.old_path));
@@ -211,9 +221,18 @@ fn backup_file(path: &str) -> Result<String, String> {
 /// Used identically by both undo and redo for edit actions.
 fn swap_edit(action: &UndoAction) -> Result<(), String> {
     let tmp = format!("{}_tmp", action.new_path);
-    std::fs::rename(&action.old_path, &tmp).map_err(|e| e.to_string())?;
-    std::fs::rename(&action.new_path, &action.old_path).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &action.new_path).map_err(|e| e.to_string())?;
+    file_ops::rename_with_retry(
+        std::path::Path::new(&action.old_path),
+        std::path::Path::new(&tmp),
+    )?;
+    file_ops::rename_with_retry(
+        std::path::Path::new(&action.new_path),
+        std::path::Path::new(&action.old_path),
+    )?;
+    file_ops::rename_with_retry(
+        std::path::Path::new(&tmp),
+        std::path::Path::new(&action.new_path),
+    )?;
     Ok(())
 }
 

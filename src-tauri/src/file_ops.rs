@@ -42,6 +42,26 @@ pub fn list_images(dir_path: &str) -> Vec<ImageInfo> {
     images
 }
 
+/// Renames a file, retrying briefly to survive transient locks (antivirus
+/// real-time scanning, webview asset streams) that are common on Windows.
+/// `std::fs::rename` fails with "access denied" if another process holds the
+/// file open, so a few short retries turn most transient failures into success.
+pub fn rename_with_retry(from: &Path, to: &Path) -> Result<(), String> {
+    let mut last_err = String::from("unknown error");
+    for attempt in 0..8 {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt < 7 {
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
 pub fn move_image(source: &str, target_dir: &str) -> Result<String, String> {
     let source_path = Path::new(source);
     let target_dir_path = Path::new(target_dir);
@@ -70,7 +90,7 @@ pub fn move_image(source: &str, target_dir: &str) -> Result<String, String> {
         count += 1;
     }
 
-    std::fs::rename(source_path, &target_path).map_err(|e| e.to_string())?;
+    rename_with_retry(source_path, &target_path)?;
 
     Ok(target_path.to_string_lossy().to_string())
 }
@@ -128,6 +148,25 @@ mod tests {
         let moved = move_image(src.to_str().unwrap(), b.to_str().unwrap()).unwrap();
         assert!(Path::new(&moved).exists());
         assert!(!src.exists());
+    }
+
+    #[test]
+    fn rename_with_retry_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.txt");
+        let to = dir.path().join("b.txt");
+        fs::write(&from, b"x").unwrap();
+        rename_with_retry(&from, &to).unwrap();
+        assert!(to.exists());
+        assert!(!from.exists());
+    }
+
+    #[test]
+    fn rename_with_retry_fails_when_source_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("missing.txt");
+        let to = dir.path().join("b.txt");
+        assert!(rename_with_retry(&from, &to).is_err());
     }
 
     #[test]

@@ -562,7 +562,7 @@ All fixes below were applied and validated in the follow-up round: `cargo fmt --
 | L9 | ⏭️ Deferred | version pin style left as-is (cosmetic) |
 | L10 | ✅ Fixed | `escapeHtml` added to `utils.js` and used in `renderShortcuts`; tests added |
 | L11 | ✅ Fixed | `let _ = window.hide()` |
-| L12 | ✅ Fixed | renamed to **HotkeyImageSorter** (productName, window title, Cargo package, package.json) |
+| L12 | ✅ Fixed | renamed to **HotkeyImageSorter** (productName, window title, Cargo package, package.json). Bundle identifier reverted to `com.imagesorter.app` — see note below |
 | L13 | ✅ Fixed | `UndoActionType` enum replaces the free string |
 | L14 | ✅ Fixed | `get_history_stats` counts actions, not batches |
 | L15 | ⏭️ Deferred | config saved on every navigation (minor perf; behavior kept) |
@@ -574,7 +574,13 @@ All fixes below were applied and validated in the follow-up round: `cargo fmt --
 | L21 | ✅ Fixed | `cargo fmt` applied; `cargo fmt --check` passes |
 | L22 | ✅ Fixed | tray `match` → `if let` (clippy is now clean) |
 
-## 11. Suggested fix order
+## 11. Post-release regression fixes
+
+**Window size reset at launch.** The bundle identifier change (`com.imagesorter.app` → `com.imagesorter.hotkey`) moved the window-state plugin's state file (it is keyed by the identifier's config dir). The saved geometry (1374×822) was in the old location, so the app opened at the tauri.conf default (800×600) — hence the cramped layout (300px sidebar + 250px info panel, tiny viewer). **Fix:** reverted the identifier to `com.imagesorter.app`; the `.app`-suffix warning is cosmetic and macOS-only. If a future rename is needed, expect the window size to reset once.
+
+**Undo immediately failing.** The undo logic was verified correct (rename target→source); however `std::fs::rename` on Windows fails transiently when another process briefly holds the file (antivirus real-time scanning, WebView2 asset streams for the just-displayed/just-edited image). The pre-audit code silently ignored these rename errors (undo appeared to "work" but the file never came back); the audit's M5 change surfaced them as `Undo failed`. **Fix:** added `file_ops::rename_with_retry` (8 attempts × 60 ms) and used it in `move_image`, undo/redo move restores and `swap_edit`. Tests: `rename_with_retry_succeeds`, `rename_with_retry_fails_when_source_missing` (12 tests total now).
+
+## 12. Suggested fix order
 
 1. **H1** (destructive hotkey bug) — 5-minute fix, prevents data misplacement.
 2. **H3 + M2** (silent failures + user feedback).
