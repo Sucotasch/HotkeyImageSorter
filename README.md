@@ -398,6 +398,7 @@ All file operations are executed through Tauri commands:
 |---------|------------|---------|
 | `list_files` | `{ dir: string }` | `ImageInfo[]` |
 | `move_images` | `{ sources, targetDir }` | `newPath[]` |
+| `rename_file` | `{ path, newName }` | `newPath` |
 | `rotate_image` | `{ path, degrees }` | `void` |
 | `undo_last_move` | `{}` | `restoredPath` (empty if nothing to undo) |
 | `redo_last_move` | `{}` | `restoredPath` (empty if nothing to redo) |
@@ -959,6 +960,7 @@ const state = {
 |---------|-----------|------------|
 | `list_files` | `{ dir: string }` | `ImageInfo[]` |
 | `move_images` | `{ sources, targetDir }` | `newPath[]` |
+| `rename_file` | `{ path, newName }` | `newPath` |
 | `rotate_image` | `{ path, degrees }` | `void` |
 | `undo_last_move` | `{}` | `restoredPath` (empty if nothing to undo) |
 | `redo_last_move` | `{}` | `restoredPath` (empty if nothing to redo) |

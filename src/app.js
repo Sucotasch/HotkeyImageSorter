@@ -233,8 +233,57 @@ function renderList() {
     div.className = `list-item ${isActive} ${isSelected}`;
     div.textContent = img.name;
     div.addEventListener('click', (e) => handleItemClick(e, index));
+    div.addEventListener('dblclick', (e) => startRename(index, div));
     el.imageList.appendChild(div);
   });
+}
+
+// Inline rename of a list item (double-click the name)
+let renamingIndex = -1;
+
+function startRename(index, itemEl) {
+  if (renamingIndex !== -1 || index < 0 || index >= state.images.length) return;
+  const img = state.images[index];
+  renamingIndex = index;
+
+  itemEl.textContent = '';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'rename-input';
+  input.value = img.name;
+  itemEl.appendChild(input);
+  input.focus();
+  // Pre-select the file stem so typing replaces the name but keeps the extension
+  const dot = img.name.lastIndexOf('.');
+  const selEnd = dot > 0 ? dot : img.name.length;
+  input.setSelectionRange(0, selEnd);
+
+  let finished = false;
+  const finish = async (commit) => {
+    if (finished) return;
+    finished = true;
+    renamingIndex = -1;
+    const newName = input.value.trim();
+    if (commit && newName && newName !== img.name) {
+      try {
+        const newPath = await invoke('rename_file', { path: img.path, newName });
+        notify(`Renamed to ${basename(newPath)}`, false);
+        await loadFiles(newPath);
+      } catch (err) {
+        notify("Rename failed: " + err);
+        renderList();
+      }
+      return;
+    }
+    renderList();
+  };
+
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') finish(true);
+    else if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(true));
 }
 
 function handleItemClick(e, index) {

@@ -188,6 +188,11 @@ fn redo_batch(
 }
 
 #[tauri::command]
+async fn rename_file(path: String, new_name: String) -> Result<String, String> {
+    file_ops::rename_file(&path, &new_name)
+}
+
+#[tauri::command]
 async fn undo_last_move(state: State<'_, AppState>) -> Result<Option<String>, String> {
     // Lock order: history before redo_history, matching every other command.
     let mut history = state.history.lock().unwrap();
@@ -383,6 +388,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_files,
             move_images,
+            rename_file,
             undo_last_move,
             redo_last_move,
             get_history_stats,

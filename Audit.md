@@ -616,6 +616,14 @@ Plus: **Escape now exits fullscreen first** (only hides to tray when not fullscr
 
 **Verification:** `node --check` ✅, `npm test` 14/14 ✅, release rebuilt.
 
+**Inline file rename** (feature request: double-clicking a list item's name did nothing). Added:
+1. **Backend `rename_file`** (`file_ops.rs` + command in `lib.rs`): validates non-empty name and rejects path separators; keeps the original extension if the typed name lacks one (so the file stays listable); **fails on collision without overwriting**; treats case-only renames as a no-op (Windows case-insensitivity); normalizes trailing dots; uses `rename_with_retry` for transient Windows locks. 6 unit tests.
+2. **Frontend inline edit** (`app.js` `startRename`): double-click a list item swaps the name for an input with the **stem pre-selected** (extension preserved); Enter/blur commit, Escape cancels; one rename at a time; success reloads and selects the renamed file (success toast), failure toasts and restores the list. Global hotkeys are bypassed while the input is focused. `.rename-input` styling; `<kbd>Dbl-click</kbd> Rename File` hint; README command table updated.
+
+**Known limitations (documented):** renames are **not undoable** (undo/redo covers Move/Edit only — a `Rename` variant in `UndoActionType` is the follow-up); clicking a toolbar button while the rename input is focused commits the rename (blur) and the button's action then runs against the stale `currentPath` → misleading toast, no data loss (low-severity race).
+
+**Verification:** `cargo test` 20/20 ✅, `cargo fmt --check` ✅, clippy 0 warnings ✅, `node --check` ✅, `npm test` 14/14 ✅, release rebuilt.
+
 ## 12. Suggested fix order
 
 1. **H1** (destructive hotkey bug) — 5-minute fix, prevents data misplacement.
