@@ -74,10 +74,7 @@ async fn undo_last_move(state: State<'_, AppState>) -> Result<bool, String> {
                 let _ = std::fs::rename(&last_action.new_path, &last_action.old_path);
                 redo_batch.push(last_action);
             } else if last_action.action_type == "edit" {
-                let tmp = format!("{}_tmp", last_action.new_path);
-                let _ = std::fs::rename(&last_action.old_path, &tmp);
-                let _ = std::fs::rename(&last_action.new_path, &last_action.old_path);
-                let _ = std::fs::rename(&tmp, &last_action.new_path);
+                let _ = swap_edit(&last_action);
                 redo_batch.push(last_action);
             }
         }
@@ -100,10 +97,7 @@ async fn redo_last_move(state: State<'_, AppState>) -> Result<bool, String> {
                 let _ = std::fs::rename(&action.old_path, &action.new_path);
                 history_batch.push(action);
             } else if action.action_type == "edit" {
-                let tmp = format!("{}_tmp", action.new_path);
-                let _ = std::fs::rename(&action.old_path, &tmp);
-                let _ = std::fs::rename(&action.new_path, &action.old_path);
-                let _ = std::fs::rename(&tmp, &action.new_path);
+                let _ = swap_edit(&action);
                 history_batch.push(action);
             }
         }
@@ -128,6 +122,16 @@ fn backup_file(path: &str) -> Result<String, String> {
     let backup_path = tmp.join(format!("img_bak_{}.{}", id, ext.to_string_lossy()));
     std::fs::copy(old_path, &backup_path).map_err(|e| e.to_string())?;
     Ok(backup_path.to_string_lossy().to_string())
+}
+
+/// Swaps the contents of `old_path` (live file) and `new_path` (temp backup).
+/// Used identically by both undo and redo for edit actions.
+fn swap_edit(action: &UndoAction) -> Result<(), String> {
+    let tmp = format!("{}_tmp", action.new_path);
+    std::fs::rename(&action.old_path, &tmp).map_err(|e| e.to_string())?;
+    std::fs::rename(&action.new_path, &action.old_path).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &action.new_path).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -294,4 +298,50 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_file(path: &std::path::Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn swap_edit_swaps_and_restores() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("img.jpg");
+        let backup = dir.path().join("backup.jpg");
+        write_file(&real, "edited");
+        write_file(&backup, "original");
+        let action = UndoAction {
+            old_path: real.to_string_lossy().into_owned(),
+            new_path: backup.to_string_lossy().into_owned(),
+            action_type: "edit".to_string(),
+        };
+
+        // Undo: live file is replaced by the pre-edit backup, edited copy goes to temp
+        swap_edit(&action).unwrap();
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "original");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "edited");
+
+        // Redo: same symmetric swap restores the edited version
+        swap_edit(&action).unwrap();
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "edited");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "original");
+    }
+
+    #[test]
+    fn swap_edit_reports_error_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("missing.jpg");
+        let backup = dir.path().join("backup.jpg");
+        let action = UndoAction {
+            old_path: real.to_string_lossy().into_owned(),
+            new_path: backup.to_string_lossy().into_owned(),
+            action_type: "edit".to_string(),
+        };
+        assert!(swap_edit(&action).is_err());
+    }
 }

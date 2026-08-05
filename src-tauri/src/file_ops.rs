@@ -64,3 +64,68 @@ pub fn move_image(source: &str, target_dir: &str) -> Result<String, String> {
     
     Ok(target_path.to_string_lossy().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn move_image_moves_and_returns_new_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let src = a.join("pic.jpg");
+        fs::write(&src, b"data").unwrap();
+
+        let moved = move_image(src.to_str().unwrap(), b.to_str().unwrap()).unwrap();
+        assert_eq!(moved, b.join("pic.jpg").to_string_lossy().to_string());
+        assert!(!src.exists());
+        assert!(b.join("pic.jpg").exists());
+    }
+
+    #[test]
+    fn move_image_renames_on_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        fs::write(a.join("pic.jpg"), b"data1").unwrap();
+
+        let moved = move_image(a.join("pic.jpg").to_str().unwrap(), b.to_str().unwrap()).unwrap();
+        assert_eq!(Path::new(&moved), b.join("pic.jpg"));
+
+        // Second file with the same name must be auto-renamed, not overwritten
+        fs::write(a.join("pic.jpg"), b"data2").unwrap();
+        let moved2 = move_image(a.join("pic.jpg").to_str().unwrap(), b.to_str().unwrap()).unwrap();
+        assert_eq!(Path::new(&moved2), b.join("pic_1.jpg"));
+        assert_eq!(fs::read_to_string(b.join("pic.jpg")).unwrap(), "data1");
+        assert_eq!(fs::read_to_string(b.join("pic_1.jpg")).unwrap(), "data2");
+    }
+
+    #[test]
+    fn move_image_creates_missing_target_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b/deep/nested");
+        fs::create_dir_all(&a).unwrap();
+        let src = a.join("pic.jpg");
+        fs::write(&src, b"data").unwrap();
+
+        let moved = move_image(src.to_str().unwrap(), b.to_str().unwrap()).unwrap();
+        assert!(Path::new(&moved).exists());
+        assert!(!src.exists());
+    }
+
+    #[test]
+    fn move_image_fails_when_source_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = dir.path().join("b");
+        fs::create_dir_all(&b).unwrap();
+        let missing = dir.path().join("nope.jpg");
+        assert!(move_image(missing.to_str().unwrap(), b.to_str().unwrap()).is_err());
+    }
+}

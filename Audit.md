@@ -6,7 +6,7 @@ Full engineering review performed per `ReviewPrompt.txt`. **No source code was c
 
 ## 1. Executive summary
 
-The project is a Tauri 2 desktop app: vanilla-JS frontend (`src/`, no bundler) + Rust backend (`src-tauri/`). It compiles cleanly with 2 warnings, but has **zero tests** and several latent correctness/robustness issues.
+The project is a Tauri 2 desktop app: vanilla-JS frontend (`src/`, no bundler) + Rust backend (`src-tauri/`). It compiles cleanly with 2 warnings. The audit found several latent correctness/robustness issues (see below) and — as a follow-up — added the first test suite to the repo (10 Rust + 4 JS tests, all passing).
 
 Top findings, in priority order:
 
@@ -30,11 +30,11 @@ Validation performed:
 
 ```bash
 cd src-tauri && cargo check      # ✅ passes, 2 warnings
-cd src-tauri && cargo test       # ✅ 0 tests (zero coverage in the whole repo)
+cd src-tauri && cargo test       # ✅ 10 tests pass (unit tests added per this audit; previously 0)
 cd src-tauri && cargo build      # ✅ full debug build links successfully, same 2 warnings
 cd src-tauri && cargo clippy --all-targets   # ✅ 3 warnings (2 known + 1 new: clippy::single_match at lib.rs:228)
 cd src-tauri && cargo fmt --check # ❌ FAILS — repo is not rustfmt-clean (import order, wrapping, trailing whitespace)
-npm test                         # ❌ no test script defined
+npm test                         # ✅ 4 JS tests pass (node:test, added per this audit; previously no test script)
 npm run build                     # ⚠️ not run: full `tauri build` (release + Windows installer bundling) is very heavy; the JS itself has no build step (frontendDist points at source)
 ```
 
@@ -486,7 +486,12 @@ mod tests {
 }
 ```
 
-Note: `AppConfig` currently has no `Default` impl (fields use `#[serde(default)]`); add `#[derive(Default)]` to make tests (and future callers) simpler.
+Note: `AppConfig` currently has no `Default` impl (fields use `#[serde(default)]`); add `#[derive(Default)]` to make tests (and future callers) simpler. This audit instead added a behavior-preserving `default_config()` in `config.rs` (`#[derive(Default)]` would silently change the defaults to `None`/empty).
+
+**Implementation status (follow-up round, committed):**
+- **10 Rust unit tests** — `cargo test` ✅: `move_image` (move/return path, collision auto-rename without overwrite, creates missing target dir, error on missing source), `config` (save→load round-trip, missing-file defaults, corrupt-file defaults, parent-dir creation), `swap_edit` (undo/redo round-trip, error on missing file). Added `tempfile = "3"` under `[dev-dependencies]`.
+- **4 JS tests** — `npm test` ✅ (`node --test`, zero new deps): `basename` extracted from `app.js` into `src/utils.js` (pure, Tauri-free) and imported back; `npm test` script added.
+- **Supporting refactors** (behavior-preserving): `config.rs` now has path-parameterized `load_config_from` / `save_config_to` / `default_config`; the duplicated edit-swap rename dance in `lib.rs` was extracted into `swap_edit` (used by both undo and redo — they were byte-identical).
 
 ---
 

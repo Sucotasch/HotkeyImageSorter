@@ -1,3 +1,5 @@
+import { basename } from './utils.js';
+
 const { invoke } = window.__TAURI__.core;
 const { open } = window.__TAURI__.dialog;
 
@@ -576,10 +578,6 @@ function renderSettingsList() {
     row.appendChild(btn);
     el.hotkeyEditList.appendChild(row);
   });
-}
-
-function basename(path) {
-  return path.split(/[\\/]/).pop();
 }
 
 init();
