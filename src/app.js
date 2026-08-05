@@ -11,12 +11,15 @@ let state = {
   folder: '',
   config: { hotkeys: {} },
   isCropActive: false,
-  cropRegion: { x: 50, y: 50, w: 200, h: 200 },
   sort: { by: 'name', dir: 1 },
   selectedPaths: new Set()
 };
 
 let currentZoom = 1;
+
+// Crop region tracked in image-fraction coordinates (0..1) so it survives
+// zoom, navigation and window resizes without leaving the image.
+let cropFrac = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
 
 // UI Elements
 const el = {
@@ -35,7 +38,8 @@ const el = {
   cropOverlay: document.getElementById('crop-overlay'),
   cropRegion: document.getElementById('crop-region'),
   modalSettings: document.getElementById('modal-settings'),
-  hotkeyEditList: document.getElementById('hotkey-edit-list')
+  hotkeyEditList: document.getElementById('hotkey-edit-list'),
+  cropLabel: document.getElementById('crop-label')
 };
 
 // Transient error/info toast
@@ -93,10 +97,25 @@ function setupEventListeners() {
 
   el.mainImage.addEventListener('wheel', (e) => {
     e.preventDefault();
-    if (e.deltaY < 0) currentZoom = Math.min(10, currentZoom + 0.1);
-    else currentZoom = Math.max(0.1, currentZoom - 0.1);
-    el.mainImage.style.transform = `scale(${currentZoom})`;
+    applyZoom(e.deltaY);
   }, { passive: false });
+  // While crop is active the dark overlay covers the image, so it must forward
+  // wheel events to zoom as well (the region stays glued via cropFrac).
+  el.cropOverlay.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    applyZoom(e.deltaY);
+  }, { passive: false });
+
+  // Reposition the crop region whenever the image (re)loads — covers
+  // navigation, rotate, crop and undo/redo refreshes uniformly.
+  el.mainImage.addEventListener('load', () => {
+    if (state.isCropActive) positionCropRegion();
+  });
+
+  // Keep the crop region glued to the image when the window is resized
+  window.addEventListener('resize', () => {
+    if (state.isCropActive) positionCropRegion();
+  });
   
   // Navigation
   window.addEventListener('keydown', handleGlobalKeydown);
@@ -118,7 +137,10 @@ function setupEventListeners() {
 
   // Crop Interaction
   setupCropDrag();
-  el.cropRegion.addEventListener('dblclick', executeCrop);
+  el.cropRegion.addEventListener('dblclick', (e) => {
+    if (e.target.classList.contains('crop-handle')) return;
+    executeCrop();
+  });
 }
 
 function updateSortButtonUI() {
@@ -475,66 +497,157 @@ function refreshCurrentImage() {
 }
 
 // Crop Logic
+
+// Displayed image rectangle in viewport coordinates (includes zoom transform)
+function imageRect() {
+  return el.mainImage.getBoundingClientRect();
+}
+
+// Wheel zoom; also keeps the crop region glued to the image when active.
+function applyZoom(deltaY) {
+  if (deltaY < 0) currentZoom = Math.min(10, currentZoom + 0.1);
+  else currentZoom = Math.max(0.1, currentZoom - 0.1);
+  el.mainImage.style.transform = `scale(${currentZoom})`;
+  if (state.isCropActive) positionCropRegion();
+}
+
+// Position the region from cropFrac, keeping it inside the current image rect.
+// The overlay does not start at window (0,0) (the sidebar shifts it), so the
+// window-space rect is converted into overlay coordinates before styling.
+function positionCropRegion() {
+  const img = imageRect();
+  if (!(img.width > 0 && img.height > 0)) return;
+  const ov = el.cropOverlay.getBoundingClientRect();
+  el.cropRegion.style.left = (img.left - ov.left + cropFrac.x * img.width) + 'px';
+  el.cropRegion.style.top = (img.top - ov.top + cropFrac.y * img.height) + 'px';
+  el.cropRegion.style.width = (cropFrac.w * img.width) + 'px';
+  el.cropRegion.style.height = (cropFrac.h * img.height) + 'px';
+  updateCropLabel();
+}
+
+// Record the region's position relative to the displayed image (0..1)
+function captureCropFrac() {
+  const img = imageRect();
+  if (!(img.width > 0 && img.height > 0)) return;
+  const r = el.cropRegion.getBoundingClientRect();
+  cropFrac.x = (r.left - img.left) / img.width;
+  cropFrac.y = (r.top - img.top) / img.height;
+  cropFrac.w = r.width / img.width;
+  cropFrac.h = r.height / img.height;
+}
+
+// Clamp a viewport-space rect so it stays fully inside the image and never
+// collapses below minSize (also caps it at the image size).
+function applyCropClamp(left, top, width, height, minSize) {
+  const img = imageRect();
+  if (!(img.width > 0 && img.height > 0)) return { left, top, width, height };
+  const minW = Math.min(minSize, img.width);
+  const minH = Math.min(minSize, img.height);
+  width = Math.max(minW, Math.min(width, img.right - left));
+  height = Math.max(minH, Math.min(height, img.bottom - top));
+  left = Math.max(img.left, Math.min(left, img.right - width));
+  top = Math.max(img.top, Math.min(top, img.bottom - height));
+  return { left, top, width, height };
+}
+
+// Live readout of the crop size in image pixels
+function updateCropLabel() {
+  if (!el.cropLabel) return;
+  const img = imageRect();
+  if (!(img.width > 0 && img.height > 0) || !el.mainImage.naturalWidth) return;
+  const scaleX = img.width / el.mainImage.naturalWidth;
+  const r = el.cropRegion.getBoundingClientRect();
+  const w = Math.round(r.width / scaleX);
+  const h = Math.round(r.height / scaleX);
+  el.cropLabel.textContent = `Double-click to crop — ${w} × ${h} px`;
+}
+
 function toggleCrop() {
   state.isCropActive = !state.isCropActive;
   el.cropOverlay.classList.toggle('hidden', !state.isCropActive);
   el.btnCrop.classList.toggle('active', state.isCropActive);
   if (state.isCropActive) {
-    const imgRect = el.cropOverlay.getBoundingClientRect();
+    // Center a 300px box on the actual image (not the viewport)
+    const img = imageRect();
+    if (!(img.width > 0 && img.height > 0)) return; // image not loaded yet
     const size = 300;
-    el.cropRegion.style.width = size + 'px';
-    el.cropRegion.style.height = size + 'px';
-    el.cropRegion.style.left = (imgRect.width / 2 - size / 2) + 'px';
-    el.cropRegion.style.top = (imgRect.height / 2 - size / 2) + 'px';
+    const w = Math.min(size, img.width);
+    const h = Math.min(size, img.height);
+    cropFrac = {
+      x: (img.width - w) / 2 / img.width,
+      y: (img.height - h) / 2 / img.height,
+      w: w / img.width,
+      h: h / img.height,
+    };
+    positionCropRegion();
   }
 }
 
 function setupCropDrag() {
   let isDragging = false;
   let startX, startY;
+  const MIN_SIZE = 20;
 
   el.cropRegion.addEventListener('mousedown', (e) => {
     if (e.target.classList.contains('crop-handle')) return;
+    if (e.button !== 0) return;
+    const rect = el.cropRegion.getBoundingClientRect();
+    startX = e.clientX - rect.left;
+    startY = e.clientY - rect.top;
     isDragging = true;
-    startX = e.clientX - el.cropRegion.offsetLeft;
-    startY = e.clientY - el.cropRegion.offsetTop;
   });
 
   window.addEventListener('mousemove', (e) => {
     if (!isDragging) return;
-    el.cropRegion.style.left = (e.clientX - startX) + 'px';
-    el.cropRegion.style.top = (e.clientY - startY) + 'px';
+    const ov = el.cropOverlay.getBoundingClientRect();
+    const clamped = applyCropClamp(
+      e.clientX - startX,
+      e.clientY - startY,
+      el.cropRegion.offsetWidth,
+      el.cropRegion.offsetHeight,
+      MIN_SIZE
+    );
+    el.cropRegion.style.left = (clamped.left - ov.left) + 'px';
+    el.cropRegion.style.top = (clamped.top - ov.top) + 'px';
+    captureCropFrac();
+    updateCropLabel();
   });
 
   window.addEventListener('mouseup', () => isDragging = false);
-  
-  // Handle resizing
+
+  // Handle resizing: corners (nw/ne/sw/se) and edges (n/s/e/w)
   const handles = el.cropRegion.querySelectorAll('.crop-handle');
   handles.forEach(h => {
     h.addEventListener('mousedown', (e) => {
       e.stopPropagation();
-      const handleClass = e.target.classList[1]; // nw, ne, sw, se
+      if (e.button !== 0) return;
+      const handleClass = e.target.classList[1]; // nw, ne, sw, se, n, s, e, w
       const startX = e.clientX;
       const startY = e.clientY;
       const startW = el.cropRegion.offsetWidth;
       const startH = el.cropRegion.offsetHeight;
-      const startL = el.cropRegion.offsetLeft;
-      const startT = el.cropRegion.offsetTop;
+      const startRect = el.cropRegion.getBoundingClientRect();
+      const startL = startRect.left; // window coords, matches applyCropClamp
+      const startT = startRect.top;
 
       const onMouseMove = (me) => {
         const dx = me.clientX - startX;
         const dy = me.clientY - startY;
+        let left = startL, top = startT, width = startW, height = startH;
 
-        if (handleClass.includes('e')) el.cropRegion.style.width = (startW + dx) + 'px';
-        if (handleClass.includes('s')) el.cropRegion.style.height = (startH + dy) + 'px';
-        if (handleClass.includes('w')) {
-          el.cropRegion.style.width = (startW - dx) + 'px';
-          el.cropRegion.style.left = (startL + dx) + 'px';
-        }
-        if (handleClass.includes('n')) {
-          el.cropRegion.style.height = (startH - dy) + 'px';
-          el.cropRegion.style.top = (startT + dy) + 'px';
-        }
+        if (handleClass.includes('e')) width = startW + dx;
+        if (handleClass.includes('s')) height = startH + dy;
+        if (handleClass.includes('w')) { width = startW - dx; left = startL + dx; }
+        if (handleClass.includes('n')) { height = startH - dy; top = startT + dy; }
+
+        const clamped = applyCropClamp(left, top, width, height, MIN_SIZE);
+        const ov = el.cropOverlay.getBoundingClientRect();
+        el.cropRegion.style.width = clamped.width + 'px';
+        el.cropRegion.style.height = clamped.height + 'px';
+        el.cropRegion.style.left = (clamped.left - ov.left) + 'px';
+        el.cropRegion.style.top = (clamped.top - ov.top) + 'px';
+        captureCropFrac();
+        updateCropLabel();
       };
 
       const onMouseUp = () => {

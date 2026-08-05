@@ -250,6 +250,13 @@ body, html {
 .crop-handle.ne { top: -5px; right: -5px; cursor: ne-resize; }
 .crop-handle.sw { bottom: -5px; left: -5px; cursor: sw-resize; }
 .crop-handle.se { bottom: -5px; right: -5px; cursor: se-resize; }
+/* Edge handles: wider for easier grabbing, centered on each side */
+.crop-handle.n, .crop-handle.s { width: 18px; height: 8px; }
+.crop-handle.e, .crop-handle.w { width: 8px; height: 18px; }
+.crop-handle.n { top: -4px; left: 50%; margin-left: -9px; cursor: n-resize; }
+.crop-handle.s { bottom: -4px; left: 50%; margin-left: -9px; cursor: s-resize; }
+.crop-handle.e { right: -4px; top: 50%; margin-top: -9px; cursor: e-resize; }
+.crop-handle.w { left: -4px; top: 50%; margin-top: -9px; cursor: w-resize; }
 
 .crop-label {
   position: absolute;

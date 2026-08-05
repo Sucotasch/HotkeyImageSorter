@@ -592,6 +592,17 @@ All fixes below were applied and validated in the follow-up round: `cargo fmt --
 
 **Verification:** `cargo test` 14/14 ✅, `cargo fmt --check` ✅, `cargo clippy --all-targets` 0 warnings ✅, `npm test` 7/7 ✅, release rebuilt.
 
+**Crop UX rework** (user report: only corner handles, no way to resize a single side; selection freely left the image). Changes in `src/index.html`, `src/style.css`, `src/app.js`:
+
+1. **Edge handles** — added `n/s/e/w` handles (wider than corners for easier grabbing, centered on each side). The resize math already used `includes('e'/'s'/'w'/'n')`, so single-edge dragging works with no logic change.
+2. **Clamping to the image** — `applyCropClamp` keeps the region fully inside the displayed image rect (with a 20px minimum) for both drag and all 8 resize directions; the region now "sticks" to image edges instead of leaving them.
+3. **Fraction-based tracking** — the region is stored in image-fraction coordinates (`cropFrac`, 0..1) and repositioned on zoom (`applyZoom`), navigation, window resize and every image `load`, so it stays glued to the image.
+4. **Coordinate-system fix** — `#crop-overlay` is offset by the 300px sidebar, so overlay-relative `style.left` differs from window-space rects; all writes now subtract the overlay origin. (Original code only worked because it mixed deltas; the new clamp-based code needed explicit conversion.)
+5. **Live size readout** — the label now shows the crop size in image pixels ("Double-click to crop — 1280 × 720 px").
+6. **Guard fixes** (from review) — `toggleCrop` no-ops when the image isn't loaded (avoids NaN fractions); dblclick on a handle no longer triggers the crop; dead `state.cropRegion` removed.
+
+**Verification:** `node --check src/app.js` ✅, `npm test` 7/7 ✅, release rebuilt.
+
 ## 12. Suggested fix order
 
 1. **H1** (destructive hotkey bug) — 5-minute fix, prevents data misplacement.
