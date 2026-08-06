@@ -64,13 +64,16 @@ pub fn extract_text_chunks(path: &str) -> Result<Vec<PngTextChunk>, String> {
     }
     Ok(out)
 }
-
 /// Writes a PNG with the given RGBA8 pixels and re-injects the text chunks.
 /// Chunks are written after the IDAT data (before IEND) — the exact position
 /// A1111/ComfyUI use, so any reader that understands their metadata will still
 /// find it. Latin-1-capable chunks keep their original type (zTXt stays
 /// compressed); anything non-Latin-1 is promoted to iTXt (UTF-8) so no prompt
 /// is lost to a charset limitation.
+///
+/// The PNG is fully encoded in memory first and only written to `path` after
+/// it is complete: an encoding failure (e.g. an over-long chunk keyword) can
+/// never leave the caller's file truncated or corrupt.
 pub fn write_png_with_text(
     path: &str,
     width: u32,
@@ -78,18 +81,24 @@ pub fn write_png_with_text(
     rgba8: &[u8],
     chunks: &[PngTextChunk],
 ) -> Result<(), String> {
-    let file = File::create(path).map_err(|e| format!("create {path}: {e}"))?;
-    let mut encoder = png::Encoder::new(file, width, height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-    writer.write_image_data(rgba8).map_err(|e| e.to_string())?;
+    let mut encoded: Vec<u8> = Vec::with_capacity(rgba8.len() + width as usize * 16);
+    {
+        let cursor = std::io::Cursor::new(&mut encoded);
+        let mut encoder = png::Encoder::new(cursor, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        writer.write_image_data(rgba8).map_err(|e| e.to_string())?;
 
-    for c in chunks {
-        write_text_chunk(&mut writer, c)?;
+        for c in chunks {
+            // A chunk that cannot be encoded (e.g. an over-long keyword, which
+            // the PNG spec limits to 79 bytes) must not fail the whole edit —
+            // the pixels are already valid, only that one chunk is skipped.
+            let _ = write_text_chunk(&mut writer, c);
+        }
+        writer.finish().map_err(|e| e.to_string())?;
     }
-    writer.finish().map_err(|e| e.to_string())?;
-    Ok(())
+    std::fs::write(path, encoded).map_err(|e| format!("write {path}: {e}"))
 }
 
 /// Writes a single text chunk after the image data. Chooses tEXt/zTXt when the

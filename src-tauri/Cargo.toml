@@ -28,6 +28,8 @@ jwalk = "0.8"
 image = { version = "0.25", features = ["avif", "avif-native"] }
 turbojpeg = "1.5"
 png = "0.17"
+kamadak-exif = "0.5"
+arboard = "3.4"
 directories = "5"
 trash = "5.2.5"
 

@@ -39,8 +39,17 @@ const el = {
   cropRegion: document.getElementById('crop-region'),
   modalSettings: document.getElementById('modal-settings'),
   hotkeyEditList: document.getElementById('hotkey-edit-list'),
-  cropLabel: document.getElementById('crop-label')
+  cropLabel: document.getElementById('crop-label'),
+  modalMetadata: document.getElementById('modal-metadata'),
+  metadataBody: document.getElementById('metadata-body')
 };
+
+// True when any modal is open (settings or metadata). Used to suppress global
+// hotkeys (Delete, Enter, A–Z, Esc) that must not fire behind a modal.
+function anyModalOpen() {
+  return !el.modalSettings.classList.contains('hidden') ||
+         !el.modalMetadata.classList.contains('hidden');
+}
 
 // Transient error/info toast
 let toastTimer;
@@ -84,6 +93,7 @@ function setupEventListeners() {
   el.btnSelectFolder.addEventListener('click', selectFolder);
   document.getElementById('btn-config-hotkeys').addEventListener('click', toggleSettings);
   document.getElementById('btn-close-settings').addEventListener('click', toggleSettings);
+  document.getElementById('btn-close-metadata').addEventListener('click', () => toggleMetadataModal());
   el.btnRotate.addEventListener('click', () => doRotate());
   el.btnCrop.addEventListener('click', () => toggleCrop());
   document.getElementById('btn-undo').addEventListener('click', () => doUndo());
@@ -473,6 +483,8 @@ async function handleGlobalKeydown(e) {
     e.preventDefault();
     if (state.isCropActive) {
       toggleCrop();
+    } else if (!el.modalMetadata.classList.contains('hidden')) {
+      toggleMetadataModal();
     } else if (!el.modalSettings.classList.contains('hidden')) {
       toggleSettings();
     } else if (await isFullscreenActive()) {
@@ -498,7 +510,7 @@ async function handleGlobalKeydown(e) {
             renderList();
         }
     }
-  } else if ((code === 'Delete' || key === 'delete') && !e.ctrlKey && !e.metaKey && !e.altKey && el.modalSettings.classList.contains('hidden')) {
+  } else if ((code === 'Delete' || key === 'delete') && !e.ctrlKey && !e.metaKey && !e.altKey && !anyModalOpen()) {
     if (state.currentPath) {
       const pathsToRemove = state.selectedPaths.size > 0 ? Array.from(state.selectedPaths) : [state.currentPath];
       
@@ -541,20 +553,23 @@ async function handleGlobalKeydown(e) {
         await loadFiles(successorPath);
       }
     }
-  } else if (e.ctrlKey && (code === 'KeyR' || key === 'r')) {
+  } else if (e.ctrlKey && (code === 'KeyI' || key === 'i')) {
+    e.preventDefault();
+    await toggleMetadataModal();
+  } else if (e.ctrlKey && (code === 'KeyR' || key === 'r') && !anyModalOpen()) {
     await doRotate();
-  } else if (e.ctrlKey && (code === 'KeyC' || key === 'c')) {
+  } else if (e.ctrlKey && (code === 'KeyC' || key === 'c') && !anyModalOpen()) {
     toggleCrop();
-  } else if (e.ctrlKey && (code === 'KeyZ' || key === 'z')) {
+  } else if (e.ctrlKey && (code === 'KeyZ' || key === 'z') && !anyModalOpen()) {
     e.preventDefault();
     await doUndo();
-  } else if (e.ctrlKey && (code === 'KeyX' || key === 'x')) {
+  } else if (e.ctrlKey && (code === 'KeyX' || key === 'x') && !anyModalOpen()) {
     e.preventDefault();
     await doRedo();
-  } else if ((key === 'enter' || code === 'Enter') && !(active && active.tagName === 'BUTTON') && el.modalSettings.classList.contains('hidden')) {
+  } else if ((key === 'enter' || code === 'Enter') && !(active && active.tagName === 'BUTTON') && !anyModalOpen()) {
     e.preventDefault();
     await toggleFullscreen();
-  } else if (code && code.startsWith('Key') && !e.ctrlKey && !e.metaKey && !e.altKey && el.modalSettings.classList.contains('hidden')) {
+  } else if (code && code.startsWith('Key') && !e.ctrlKey && !e.metaKey && !e.altKey && !anyModalOpen()) {
     const char = code.replace('Key', '').toLowerCase();
     const targetDir = state.config.hotkeys[char];
     if (targetDir && state.currentPath) {
@@ -883,6 +898,121 @@ function toggleSettings() {
     renderShortcuts();
     invoke('save_config', { config: state.config });
   }
+}
+
+// --- Metadata modal (Ctrl+I) -------------------------------------------
+
+async function toggleMetadataModal() {
+  const opening = el.modalMetadata.classList.contains('hidden');
+  if (!opening) {
+    el.modalMetadata.classList.add('hidden');
+    return;
+  }
+  if (!state.currentPath) {
+    notify('No image selected');
+    return;
+  }
+  el.modalMetadata.classList.remove('hidden');
+  el.metadataBody.innerHTML = '<div class="metadata-loading">Loading…</div>';
+  try {
+    const meta = await invoke('get_metadata', { path: state.currentPath });
+    renderMetadata(meta);
+  } catch (err) {
+    el.metadataBody.innerHTML = `<div class="metadata-error">Failed to read metadata: ${escapeHtml(String(err))}</div>`;
+  }
+}
+
+function renderMetadata(meta) {
+  const sections = [];
+
+  // File summary
+  const date = meta.modified ? new Date(meta.modified * 1000).toLocaleString() : '—';
+  sections.push(`
+    <div class="metadata-section">
+      <h3>File</h3>
+      <table class="meta-table">
+        <tr><td>Name</td><td>${escapeHtml(meta.name)}</td></tr>
+        <tr><td>Format</td><td>${escapeHtml(meta.format.toUpperCase())}</td></tr>
+        <tr><td>Size</td><td>${formatBytes(meta.size)}</td></tr>
+        <tr><td>Modified</td><td>${escapeHtml(date)}</td></tr>
+      </table>
+    </div>`);
+
+  // AI prompt (if present) with copy actions
+  if (meta.ai) {
+    const ai = meta.ai;
+    const promptBlock = ai.prompt
+      ? `<pre class="meta-ai-prompt">${escapeHtml(ai.prompt)}</pre>`
+      : '';
+    const negativeBlock = ai.negative_prompt
+      ? `<h4>Negative</h4><pre class="meta-ai-prompt meta-ai-negative">${escapeHtml(ai.negative_prompt)}</pre>`
+      : '';
+    sections.push(`
+      <div class="metadata-section metadata-ai">
+        <div class="metadata-ai-head">
+          <h3>AI Generation <span class="meta-ai-source">${escapeHtml(ai.source)}</span></h3>
+          <div class="meta-copy-btns">
+            ${ai.prompt ? `<button class="btn-secondary" data-copy="${escapeAttr(ai.prompt)}" title="Copy prompt">Copy prompt</button>` : ''}
+            ${ai.negative_prompt ? `<button class="btn-secondary" data-copy="${escapeAttr(ai.negative_prompt)}" title="Copy negative prompt">Copy negative</button>` : ''}
+            <button class="btn-secondary" data-copy="${escapeAttr(ai.raw)}" title="Copy raw payload">Copy raw</button>
+          </div>
+        </div>
+        ${promptBlock}
+        ${negativeBlock}
+        ${ai.params ? `<h4>Parameters</h4><pre class="meta-ai-params">${escapeHtml(ai.params)}</pre>` : ''}
+      </div>`);
+  } else {
+    sections.push(`<div class="metadata-section"><div class="metadata-noai">No AI generation prompt detected.</div></div>`);
+  }
+
+  // PNG text chunks (prompts not otherwise categorized)
+  if (meta.text_chunks && meta.text_chunks.length) {
+    const rows = meta.text_chunks
+      .map(c => `<tr><td>${escapeHtml(c.key)}</td><td class="meta-cell-wrap">${escapeHtml(c.value)}</td></tr>`)
+      .join('');
+    sections.push(`<div class="metadata-section"><h3>PNG Text Chunks</h3><table class="meta-table">${rows}</table></div>`);
+  }
+
+  // JPEG comments
+  if (meta.comments && meta.comments.length) {
+    const rows = meta.comments.map(c => `<tr><td>Comment</td><td class="meta-cell-wrap">${escapeHtml(c)}</td></tr>`).join('');
+    sections.push(`<div class="metadata-section"><h3>JPEG Comments</h3><table class="meta-table">${rows}</table></div>`);
+  }
+
+  // EXIF
+  if (meta.exif && meta.exif.length) {
+    const rows = meta.exif
+      .map(c => `<tr><td>${escapeHtml(c.key)}</td><td class="meta-cell-wrap">${escapeHtml(c.value)}</td></tr>`)
+      .join('');
+    sections.push(`<div class="metadata-section"><h3>EXIF (${meta.exif.length})</h3><table class="meta-table">${rows}</table></div>`);
+  } else {
+    sections.push(`<div class="metadata-section"><div class="metadata-noai">No EXIF data.</div></div>`);
+  }
+
+  el.metadataBody.innerHTML = sections.join('');
+
+  // Copy buttons
+  el.metadataBody.querySelectorAll('[data-copy]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        await invoke('copy_text', { text: btn.dataset.copy });
+        notify('Copied to clipboard', false);
+      } catch (err) {
+        notify('Copy failed: ' + err);
+      }
+    });
+  });
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  const kb = bytes / 1024;
+  if (kb < 1024) return kb.toFixed(1) + ' KB';
+  return (kb / 1024).toFixed(1) + ' MB';
+}
+
+function escapeAttr(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function renderSettingsList() {

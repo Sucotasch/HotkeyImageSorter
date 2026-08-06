@@ -89,10 +89,24 @@
           <kbd>Ctrl+C</kbd> Toggle Crop<br>
           <kbd>Ctrl+Z</kbd> Undo / <kbd>Ctrl+X</kbd> Redo<br>
           <kbd>Enter</kbd> Fullscreen<br>
+          <kbd>Ctrl+I</kbd> Image Metadata<br>
           <kbd>Wheel</kbd> Zoom Image
         </div>
       </div>
     </aside>
+  </div>
+
+  <!-- Metadata Modal -->
+  <div id="modal-metadata" class="modal hidden">
+    <div class="modal-content metadata-content">
+      <div class="metadata-header">
+        <h2>Image Metadata</h2>
+        <button id="btn-close-metadata" class="btn-secondary" title="Close (Esc)">✕</button>
+      </div>
+      <div id="metadata-body" class="metadata-body">
+        <div class="metadata-loading">Loading…</div>
+      </div>
+    </div>
   </div>
 
   <!-- Settings Modal -->

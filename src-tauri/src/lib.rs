@@ -3,6 +3,7 @@ mod config;
 mod file_ops;
 mod image_proc;
 mod jpeg_meta;
+mod metadata;
 mod models;
 mod png_meta;
 
@@ -305,6 +306,19 @@ async fn get_config() -> AppConfig {
     config::get_config()
 }
 
+/// Returns everything the Ctrl+I metadata modal needs for one image.
+#[tauri::command]
+async fn get_metadata(path: String) -> Result<crate::models::ImageMetadata, String> {
+    metadata::get_metadata(&path)
+}
+
+/// Copies the given text to the system clipboard (for metadata copy buttons).
+#[tauri::command]
+async fn copy_text(text: String) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(text).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn save_config(config: AppConfig) -> Result<(), String> {
     config::save_config(config)
@@ -406,7 +420,9 @@ pub fn run() {
             get_config,
             save_config,
             trash_images,
-            hide_window
+            hide_window,
+            get_metadata,
+            copy_text
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
