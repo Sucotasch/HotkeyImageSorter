@@ -34,16 +34,16 @@ pub fn get_metadata(path: &str) -> Result<ImageMetadata, String> {
     let ai = detect_ai_prompt(&exif, &text_chunks, &comments);
 
     // ComfyUI stores its `prompt:`/`workflow:` JSON blobs in EXIF fields
-    // (commonly Make/Model, sometimes ImageDescription/UserComment). Those are
-    // surfaced in the AI section, so keep the multi-KB strings out of the EXIF
-    // table.
+    // (commonly Make/Model, sometimes ImageDescription/UserComment) — some
+    // generators write a bare graph without a prefix. Those are surfaced in
+    // the AI section, so keep the multi-KB strings out of the EXIF table.
     let exif_display: Vec<MetadataEntry> = exif
         .iter()
         .filter(|e| {
             !(matches!(
                 e.key.as_str(),
                 "Make" | "Model" | "ImageDescription" | "UserComment"
-            ) && is_comfyui_exif_value(&e.value))
+            ) && (is_comfyui_exif_value(&e.value) || looks_like_comfyui_graph(&e.value)))
         })
         .cloned()
         .collect();
@@ -354,7 +354,9 @@ fn find_jpeg_prompt_marker(bytes: &[u8]) -> bool {
                     if matches!(
                         k.as_str(),
                         "make" | "model" | "imagedescription" | "usercomment"
-                    ) && (is_comfyui_exif_value(&field.value) || looks_like_a1111(&field.value))
+                    ) && (is_comfyui_exif_value(&field.value)
+                        || looks_like_comfyui_graph(&field.value)
+                        || looks_like_a1111(&field.value))
                     {
                         return true;
                     }
@@ -618,6 +620,22 @@ fn detect_ai_prompt(
         }
     }
 
+    // Some generators (e.g. civitai AIR) write the bare ComfyUI graph into
+    // EXIF UserComment / ImageDescription without a `prompt:`/`workflow:`
+    // prefix. If it parses as a ComfyUI graph with actual prompt texts,
+    // surface it.
+    for key in ["UserComment", "ImageDescription"] {
+        if let Some(v) = exif_lookup(key) {
+            if looks_like_comfyui_graph(&v) {
+                if let Some(info) = parse_comfyui_json("prompt", &v) {
+                    if !info.prompt.is_empty() {
+                        return Some(info);
+                    }
+                }
+            }
+        }
+    }
+
     None
 }
 
@@ -638,6 +656,15 @@ fn split_comfyui_payload(value: &str) -> Option<(&'static str, &str)> {
 /// (case-insensitive prefix).
 fn is_comfyui_exif_value(value: &str) -> bool {
     split_comfyui_payload(value).is_some()
+}
+
+/// Heuristic: does this value look like a *bare* ComfyUI graph (JSON object
+/// with `class_type` nodes) written without a `prompt:`/`workflow:` prefix?
+/// Some generators (e.g. civitai AIR) store the graph directly in EXIF
+/// UserComment.
+fn looks_like_comfyui_graph(value: &str) -> bool {
+    let v = value.trim_start();
+    v.starts_with('{') && v.contains("\"class_type\"") && v.contains("\"inputs\"")
 }
 
 /// Heuristic: does this text look like an A1111 `parameters` payload?
@@ -1275,6 +1302,49 @@ mod tests {
         let info = parse_comfyui_json("prompt", json).unwrap();
         assert!(info.prompt.contains("a cat on a beach"));
         assert_eq!(info.source, "ComfyUI");
+    }
+
+    #[test]
+    fn bare_comfyui_graph_in_usercomment_detected() {
+        // civitai AIR writes the ComfyUI graph directly into EXIF UserComment
+        // (UTF-16BE, `UNICODE\0` header) without a `prompt:`/`workflow:`
+        // prefix. It must still be detected and its prompt texts extracted.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("air.jpg");
+        {
+            let img = image::RgbImage::from_pixel(16, 16, image::Rgb([1, 2, 3]));
+            img.save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let graph = r#"{"resource-stack":{"class_type":"CheckpointLoaderSimple","inputs":{}},"6":{"class_type":"smZ CLIPTextEncode","inputs":{"text":"a cat on a beach, masterpiece"}},"7":{"class_type":"smZ CLIPTextEncode","inputs":{"text":"worst quality, blurry"}}}"#;
+        let tiff = build_tiff_with_utf16_usercomment(graph);
+        let mut exif_payload = b"Exif\0\0".to_vec();
+        exif_payload.extend_from_slice(&tiff);
+        let seg = jpeg_meta::JpegSegment {
+            marker: 0xE1,
+            data: exif_payload,
+        };
+        let with_exif = jpeg_meta::merge_missing_segments(&bytes, std::slice::from_ref(&seg));
+        std::fs::write(&path, &with_exif).unwrap();
+
+        assert!(looks_like_comfyui_graph(graph));
+        assert!(!looks_like_comfyui_graph("Canon EOS 5D"));
+        assert!(!looks_like_comfyui_graph(""));
+
+        // Badge-level detection
+        assert!(find_jpeg_prompt_marker(&std::fs::read(&path).unwrap()));
+
+        // Full metadata: prompt texts extracted from the bare graph
+        let meta = get_metadata(path.to_str().unwrap()).unwrap();
+        let ai = meta
+            .ai
+            .expect("bare ComfyUI graph in UserComment must be detected");
+        assert_eq!(ai.source, "ComfyUI");
+        assert!(ai.prompt.contains("a cat on a beach"));
+        assert!(ai.prompt.contains("worst quality"));
+        // The graph JSON is hidden from the EXIF table (surfaced in AI block)
+        assert!(!meta.exif.iter().any(|e| e.key == "UserComment"));
     }
 
     #[test]
