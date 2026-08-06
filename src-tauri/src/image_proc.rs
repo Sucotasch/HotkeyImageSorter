@@ -1,6 +1,21 @@
 use crate::{jpeg_meta, png_meta};
 use image::{GenericImageView, ImageEncoder};
 
+/// Detects the image format of `path`. `.jif` files are the JPEG Interchange
+/// Format (byte-identical to JPEG) but the `image` crate doesn't recognise the
+/// extension, so map it explicitly to `Jpeg`.
+fn detect_format(path: &str) -> Result<image::ImageFormat, String> {
+    if std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("jif"))
+        .unwrap_or(false)
+    {
+        return Ok(image::ImageFormat::Jpeg);
+    }
+    image::ImageFormat::from_path(path).map_err(|e| e.to_string())
+}
+
 /// Re-encodes the image at `path` with `op` applied, preserving metadata that
 /// the `image` crate would drop:
 ///   - JPEG: raw APPn/COM segments (EXIF, XMP, ICC, comments, AI prompts) are
@@ -12,7 +27,7 @@ fn edit_image(
     path: &str,
     op: impl Fn(image::DynamicImage) -> image::DynamicImage,
 ) -> Result<(), String> {
-    let fmt = image::ImageFormat::from_path(path).map_err(|e| e.to_string())?;
+    let fmt = detect_format(path)?;
     match fmt {
         image::ImageFormat::Jpeg => {
             let original = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -90,7 +105,7 @@ pub fn rotate_image(path: &str, degrees: i32) -> Result<(), String> {
     }
     // JPEGs get the lossless libjpeg-turbo path when possible; otherwise we
     // fall back to the metadata-preserving re-encode.
-    if image::ImageFormat::from_path(path)
+    if detect_format(path)
         .map(|f| f == image::ImageFormat::Jpeg)
         .unwrap_or(false)
         && try_lossless_jpeg_rotate(path, degrees)?

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { basename, escapeHtml, computeResizeRect, computeVisibleRange } from '../src/utils.js';
+import { basename, escapeHtml, computeResizeRect, computeVisibleRange, compareImages } from '../src/utils.js';
 
 test('basename extracts the file name from a forward-slash path', () => {
   assert.equal(basename('C:/Users/me/pics/photo.jpg'), 'photo.jpg');
@@ -119,6 +119,67 @@ test('computeVisibleRange never returns start after end', () => {
   // pathological: viewport smaller than a row, top of the list
   const r = computeVisibleRange(2, 4, ROW_H, 100, 0);
   assert.ok(r.start <= r.end);
+});
+
+// --- Name sorting ---
+const img = (name) => ({ name, modified: 0, size: 0 });
+
+test('sort names case-insensitively: lowercase "a" before uppercase "Z"', () => {
+  const list = [img('Zulu.jpg'), img('apple.jpg'), img('mango.jpg')];
+  const sorted = [...list].sort((a, b) => compareImages(a, b, 'name', 1));
+  assert.deepEqual(
+    sorted.map((i) => i.name),
+    ['apple.jpg', 'mango.jpg', 'Zulu.jpg']
+  );
+});
+
+test('sort names is a single alphabet pass (no uppercase/lowercase split)', () => {
+  // Case is ignored (sensitivity base): lowercase and uppercase interleave in
+  // one alphabet pass instead of sorting every uppercase name before every
+  // lowercase one. Within an equal-name group the original order is kept
+  // (stable sort).
+  const list = ['Zulu.jpg', 'apple.jpg', 'mango.jpg', 'Mango.jpg', 'Apricot.jpg'].map(img);
+  const sorted = [...list].sort((a, b) => compareImages(a, b, 'name', 1));
+  assert.deepEqual(
+    sorted.map((i) => i.name),
+    ['apple.jpg', 'Apricot.jpg', 'mango.jpg', 'Mango.jpg', 'Zulu.jpg']
+  );
+});
+
+test('sort names ignores case entirely (a before Z)', () => {
+  const sorted = ['Z.jpg', 'a.jpg'].map(img).sort((x, y) => compareImages(x, y, 'name', 1));
+  assert.deepEqual(sorted.map((i) => i.name), ['a.jpg', 'Z.jpg']);
+});
+
+test('sort names naturally: img2 before img10', () => {
+  const list = ['img10.jpg', 'img2.jpg', 'img1.jpg'].map(img);
+  const sorted = [...list].sort((a, b) => compareImages(a, b, 'name', 1));
+  assert.deepEqual(
+    sorted.map((i) => i.name),
+    ['img1.jpg', 'img2.jpg', 'img10.jpg']
+  );
+});
+
+test('sort names descending flips the order', () => {
+  const list = ['b.jpg', 'A.jpg', 'c.jpg'].map(img);
+  const sorted = [...list].sort((a, b) => compareImages(a, b, 'name', -1));
+  assert.deepEqual(
+    sorted.map((i) => i.name),
+    ['c.jpg', 'b.jpg', 'A.jpg']
+  );
+});
+
+test('sort returns 0 for equal names (stable sort requirement)', () => {
+  assert.equal(compareImages(img('x.jpg'), img('x.jpg'), 'name', 1), 0);
+});
+
+test('sort by size and modified use numeric comparison', () => {
+  const a = { name: 'a', size: 10, modified: 100 };
+  const b = { name: 'b', size: 20, modified: 50 };
+  assert.equal(compareImages(a, b, 'size', 1), -1);
+  assert.equal(compareImages(a, b, 'size', -1), 1);
+  assert.equal(compareImages(a, b, 'modified', 1), 1);
+  assert.equal(compareImages(a, b, 'modified', -1), -1);
 });
 
 test('north-west corner drag clamps both axes independently', () => {

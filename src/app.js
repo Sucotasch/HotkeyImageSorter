@@ -1,4 +1,4 @@
-import { basename, escapeHtml, computeResizeRect, computeVisibleRange } from './utils.js';
+import { basename, escapeHtml, computeResizeRect, computeVisibleRange, compareImages } from './utils.js';
 
 const { invoke } = window.__TAURI__.core;
 const { open } = window.__TAURI__.dialog;
@@ -227,11 +227,7 @@ async function loadFiles(initialLoadPath = null) {
 let lastListSignature = '';
 
 function sortAndRender(initialLoadPath = null) {
-  state.images.sort((a, b) => {
-    let valA = a[state.sort.by];
-    let valB = b[state.sort.by];
-    return valA < valB ? -state.sort.dir : state.sort.dir;
-  });
+  state.images.sort((a, b) => compareImages(a, b, state.sort.by, state.sort.dir));
   // Avoid rebuilding the DOM when the list content/order is unchanged
   const signature = state.images.map(i => i.path).join('\n');
   if (signature !== lastListSignature) {

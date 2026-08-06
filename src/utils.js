@@ -22,6 +22,39 @@ export function computeVisibleRange(scrollTop, viewportH, rowH, total, overscan)
   return { start: first, end: Math.max(first, last) };
 }
 
+/**
+ * Compare two list entries for sorting.
+ *
+ * Names use a locale-aware, case-insensitive comparison with natural numeric
+ * ordering ("img2.jpg" < "img10.jpg"; "apple" before "Zebra") — a
+ * case-sensitive byte comparison would sort every uppercase name before every
+ * lowercase one, producing two passes over the alphabet. Equal values return
+ * 0 (required for a stable sort).
+ *
+ * @param {object} a  ImageInfo entry
+ * @param {object} b  ImageInfo entry
+ * @param {string} by Sort key: 'name' | 'modified' | 'size'
+ * @param {number} dir 1 (ascending) or -1 (descending)
+ */
+export function compareImages(a, b, by, dir) {
+  const valA = a[by];
+  const valB = b[by];
+  let cmp;
+  if (by === 'name') {
+    cmp = String(valA).localeCompare(String(valB), undefined, {
+      sensitivity: 'base',
+      numeric: true,
+    });
+  } else if (valA < valB) {
+    cmp = -1;
+  } else if (valA > valB) {
+    cmp = 1;
+  } else {
+    cmp = 0;
+  }
+  return cmp === 0 ? 0 : cmp * dir;
+}
+
 export function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;',

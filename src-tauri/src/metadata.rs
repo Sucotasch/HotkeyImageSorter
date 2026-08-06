@@ -16,7 +16,16 @@ pub fn get_metadata(path: &str) -> Result<ImageMetadata, String> {
 
     let format = image::ImageFormat::from_path(path)
         .map(|f| format_extension(&f))
-        .unwrap_or_else(|_| extension(path).to_string());
+        .unwrap_or_else(|_| {
+            // `.jif` is the JPEG Interchange Format — byte-identical to JPEG —
+            // but the `image` crate doesn't recognise the extension.
+            let ext = extension(path);
+            if ext.eq_ignore_ascii_case("jif") {
+                "jpeg".to_string()
+            } else {
+                ext.to_string()
+            }
+        });
 
     let exif = read_exif(path)?;
     let text_chunks = png_meta::extract_text_chunks(path).unwrap_or_default();
@@ -24,13 +33,17 @@ pub fn get_metadata(path: &str) -> Result<ImageMetadata, String> {
 
     let ai = detect_ai_prompt(&exif, &text_chunks, &comments);
 
-    // ComfyUI stores its `workflow:`/`prompt:` JSON blobs in EXIF Make/Model.
-    // Those are surfaced in the AI section, so keep the multi-KB strings out
-    // of the EXIF table.
+    // ComfyUI stores its `prompt:`/`workflow:` JSON blobs in EXIF fields
+    // (commonly Make/Model, sometimes ImageDescription/UserComment). Those are
+    // surfaced in the AI section, so keep the multi-KB strings out of the EXIF
+    // table.
     let exif_display: Vec<MetadataEntry> = exif
         .iter()
         .filter(|e| {
-            !(matches!(e.key.as_str(), "Make" | "Model") && is_comfyui_exif_value(&e.value))
+            !(matches!(
+                e.key.as_str(),
+                "Make" | "Model" | "ImageDescription" | "UserComment"
+            ) && is_comfyui_exif_value(&e.value))
         })
         .cloned()
         .collect();
@@ -245,7 +258,7 @@ fn can_carry_prompt(path: &str) -> bool {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    matches!(ext.as_str(), "png" | "jpg" | "jpeg")
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "jif")
 }
 
 /// Cheap presence check: returns true when the file has AI metadata. Doesn't
@@ -331,17 +344,17 @@ fn find_jpeg_prompt_marker(bytes: &[u8]) -> bool {
     }
     // EXIF: some tools store the prompt in UserComment or ImageDescription
     // rather than a COM segment; ComfyUI puts `workflow:`/`prompt:` JSON in
-    // Make/Model. Parse only the APP1 EXIF blob via kamadak-exif.
+    // Make/Model/ImageDescription/UserComment. Parse only the APP1 EXIF blob
+    // via the tolerant reader.
     for seg in &segments {
         if seg.marker == 0xE1 && seg.data.starts_with(b"Exif\0\0") {
             if let Some(exif) = parse_exif_bytes(&seg.data) {
                 for field in exif {
                     let k = field.key.to_ascii_lowercase();
-                    if (k == "make" || k == "model") && is_comfyui_exif_value(&field.value) {
-                        return true;
-                    }
-                    if (k == "usercomment" || k == "imagedescription")
-                        && looks_like_a1111(&field.value)
+                    if matches!(
+                        k.as_str(),
+                        "make" | "model" | "imagedescription" | "usercomment"
+                    ) && (is_comfyui_exif_value(&field.value) || looks_like_a1111(&field.value))
                     {
                         return true;
                     }
@@ -553,57 +566,38 @@ fn detect_ai_prompt(
             .find(|e| e.key.eq_ignore_ascii_case(key))
             .map(|e| e.value.clone())
     };
-    let user_comment = exif_lookup("UserComment");
-    if let Some(uc) = user_comment {
-        if let Some(info) = parse_comfyui_exif(&uc) {
-            return Some(info);
-        }
-        if looks_like_a1111(&uc) {
-            if let Some(info) = parse_a1111_parameters(&uc) {
-                return Some(info);
-            }
-        }
-    }
-    let description = exif_lookup("ImageDescription");
-    if let Some(desc) = description {
-        if let Some(info) = parse_comfyui_exif(&desc) {
-            return Some(info);
-        }
-        if looks_like_a1111(&desc) {
-            if let Some(info) = parse_a1111_parameters(&desc) {
-                return Some(info);
-            }
-        }
-    }
-    // ComfyUI JPEG convention: EXIF Make holds `workflow:{json}` and Model
-    // holds `prompt:{json}`. Prefer the `prompt` payload — it carries the
-    // executed prompt texts — and keep the UI workflow graph visible too
-    // (it is hidden from the EXIF table, so it must surface in the AI block).
+    // ComfyUI JPEG convention: `prompt:{json}` / `workflow:{json}` payloads
+    // may live in any of Make/Model/ImageDescription/UserComment (some
+    // writers capitalise the prefix, e.g. `Prompt:`). Prefer the `prompt`
+    // payload — it carries the executed prompt texts — and keep the UI
+    // workflow graph visible too (it is hidden from the EXIF table, so it
+    // must surface in the AI block).
     let mut workflow_json: Option<String> = None;
-    for key in ["Make", "Model"] {
-        if let Some(v) = exif_lookup(key) {
-            if let Some(json) = v.trim().strip_prefix("workflow:") {
-                if json.trim_start().starts_with('{') {
-                    workflow_json = Some(json.to_string());
-                }
+    let mut prompt_info: Option<AiPromptInfo> = None;
+    for key in ["Make", "Model", "ImageDescription", "UserComment"] {
+        let Some(v) = exif_lookup(key) else { continue };
+        let Some((kind, json)) = split_comfyui_payload(&v) else {
+            continue;
+        };
+        if !json.trim_start().starts_with('{') {
+            continue;
+        }
+        match kind {
+            "workflow" if workflow_json.is_none() => workflow_json = Some(json.to_string()),
+            "prompt" if prompt_info.is_none() => {
+                prompt_info = parse_comfyui_json("prompt", json);
             }
+            _ => {}
         }
     }
-    for key in ["Make", "Model"] {
-        if let Some(v) = exif_lookup(key) {
-            if let Some(json) = v.trim().strip_prefix("prompt:") {
-                if let Some(info) = parse_comfyui_json("prompt", json) {
-                    // A degenerate `prompt` graph with no extracted texts is
-                    // not useful — fall through to the workflow payload.
-                    if !info.prompt.is_empty() {
-                        let mut info = info;
-                        if let Some(wf) = &workflow_json {
-                            info.params = wf.clone();
-                        }
-                        return Some(info);
-                    }
-                }
+    if let Some(mut info) = prompt_info {
+        // A degenerate `prompt` graph with no extracted texts is not useful —
+        // fall through to the workflow payload.
+        if !info.prompt.is_empty() {
+            if let Some(wf) = &workflow_json {
+                info.params = wf.clone();
             }
+            return Some(info);
         }
     }
     if let Some(wf) = &workflow_json {
@@ -612,26 +606,38 @@ fn detect_ai_prompt(
         }
     }
 
+    // A1111-style prompts in EXIF UserComment / ImageDescription (no ComfyUI
+    // prefix).
+    for key in ["UserComment", "ImageDescription"] {
+        if let Some(v) = exif_lookup(key) {
+            if looks_like_a1111(&v) {
+                if let Some(info) = parse_a1111_parameters(&v) {
+                    return Some(info);
+                }
+            }
+        }
+    }
+
     None
 }
 
-/// Parses ComfyUI's `key:{json}` EXIF payloads (`prompt:`/`workflow:`
-/// prefixes) that some JPEG writers store in Make, Model or UserComment.
-fn parse_comfyui_exif(value: &str) -> Option<AiPromptInfo> {
-    let v = value.trim();
-    if let Some(json) = v.strip_prefix("prompt:") {
-        return parse_comfyui_json("prompt", json);
-    }
-    if let Some(json) = v.strip_prefix("workflow:") {
-        return parse_comfyui_json("workflow", json);
-    }
-    None
-}
-
-/// True when the value is a ComfyUI `prompt:`/`workflow:` JSON payload.
-fn is_comfyui_exif_value(value: &str) -> bool {
+/// Case-insensitively splits a ComfyUI EXIF value (`prompt:{json}` or
+/// `workflow:{json}`) into its payload kind and the JSON body. Some writers
+/// capitalise the prefix (`Prompt:`/`Workflow:`), so the match ignores case.
+fn split_comfyui_payload(value: &str) -> Option<(&'static str, &str)> {
     let v = value.trim_start();
-    v.starts_with("prompt:") || v.starts_with("workflow:")
+    for (prefix, kind) in [("prompt:", "prompt"), ("workflow:", "workflow")] {
+        if v.len() >= prefix.len() && v[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            return Some((kind, &v[prefix.len()..]));
+        }
+    }
+    None
+}
+
+/// True when the value is a ComfyUI `prompt:`/`workflow:` JSON payload
+/// (case-insensitive prefix).
+fn is_comfyui_exif_value(value: &str) -> bool {
+    split_comfyui_payload(value).is_some()
 }
 
 /// Heuristic: does this text look like an A1111 `parameters` payload?
@@ -722,9 +728,14 @@ fn looks_like_param_line(trimmed: &str) -> bool {
         || trimmed.starts_with("Version:")
 }
 
-/// Parses a ComfyUI `prompt`/`workflow` JSON: collects the `text` fields of
-/// every CLIP text-encoding node (the actual prompts) and keeps the JSON as
-/// the raw payload.
+/// Parses a ComfyUI `prompt`/`workflow` JSON: collects the prompt text of
+/// every text-encoding node (the actual prompts) and keeps the JSON as the
+/// raw payload.
+///
+/// Text-encoding nodes store their prompt in different input keys depending
+/// on the model family:
+/// - `CLIPTextEncode` / `CLIPTextEncodeFlux` → `inputs.text`
+/// - Qwen-Image nodes (`TextEncodeQwenImage*`) → `inputs.prompt`
 fn parse_comfyui_json(keyword: &str, json: &str) -> Option<AiPromptInfo> {
     if !json.trim_start().starts_with('{') {
         return None;
@@ -732,14 +743,16 @@ fn parse_comfyui_json(keyword: &str, json: &str) -> Option<AiPromptInfo> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let obj = v.as_object()?;
 
-    // Collect all nodes whose inputs contain a "text" string (CLIPTextEncode,
-    // CLIPTextEncodeFlux, etc.).
     let mut prompts: Vec<String> = Vec::new();
     for (_, node) in obj {
-        if let Some(inputs) = node.get("inputs").and_then(|i| i.as_object()) {
-            if let Some(text) = inputs.get("text").and_then(|t| t.as_str()) {
+        let Some(inputs) = node.get("inputs").and_then(|i| i.as_object()) else {
+            continue;
+        };
+        for key in ["text", "prompt"] {
+            if let Some(text) = inputs.get(key).and_then(|t| t.as_str()) {
                 if !text.trim().is_empty() {
                     prompts.push(text.trim().to_string());
+                    break;
                 }
             }
         }
@@ -1057,20 +1070,98 @@ mod tests {
         assert!(!meta.exif.iter().any(|e| e.key == "Make"));
         assert!(!meta.exif.iter().any(|e| e.key == "Model"));
     }
-
     #[test]
-    fn parse_comfyui_exif_prefixes() {
+    fn split_comfyui_payload_prefixes() {
         let prompt_json =
             r#"{"1":{"inputs":{"text":"hello world"},"class_type":"CLIPTextEncode"}}"#;
-        let info = parse_comfyui_exif(&format!("prompt:{prompt_json}")).unwrap();
+        let val = format!("prompt:{prompt_json}");
+        let (kind, json) = split_comfyui_payload(&val).unwrap();
+        assert_eq!(kind, "prompt");
+        assert!(json.contains("hello world"));
+        let info = parse_comfyui_json(kind, json).unwrap();
         assert_eq!(info.source, "ComfyUI");
         assert!(info.prompt.contains("hello world"));
 
-        let wf = parse_comfyui_exif(r#"workflow:{"id":"x"}"#).unwrap();
-        assert_eq!(wf.source, "ComfyUI");
-        assert!(wf.raw.contains("\"id\""));
+        let (kind, wf) = split_comfyui_payload(r#"workflow:{"id":"x"}"#).unwrap();
+        assert_eq!(kind, "workflow");
+        let info = parse_comfyui_json(kind, wf).unwrap();
+        assert!(info.raw.contains("\"id\""));
 
-        assert!(parse_comfyui_exif("Steps: 20, Sampler: Euler").is_none());
+        assert!(split_comfyui_payload("Steps: 20, Sampler: Euler").is_none());
+    }
+
+    #[test]
+    fn split_comfyui_payload_capitalized_prefixes() {
+        // Some writers (e.g. WebUI-compatible generators) capitalise the
+        // ComfyUI prefix: `Prompt:` / `Workflow:` instead of lowercase.
+        let prompt_json = r#"{"1":{"inputs":{"text":"a red car"},"class_type":"CLIPTextEncode"}}"#;
+        let val = format!("Prompt:{prompt_json}");
+        let (kind, json) = split_comfyui_payload(&val).unwrap();
+        assert_eq!(kind, "prompt");
+        let info = parse_comfyui_json(kind, json).unwrap();
+        assert_eq!(info.source, "ComfyUI");
+        assert!(info.prompt.contains("a red car"));
+
+        let (kind, wf) = split_comfyui_payload(r#"Workflow:{"id":"x"}"#).unwrap();
+        assert_eq!(kind, "workflow");
+        let info = parse_comfyui_json(kind, wf).unwrap();
+        assert!(info.raw.contains("\"id\""));
+
+        assert!(is_comfyui_exif_value("Prompt:{}"));
+        assert!(is_comfyui_exif_value("Workflow:{}"));
+        assert!(is_comfyui_exif_value("prompt:{}"));
+        assert!(is_comfyui_exif_value("workflow:{}"));
+        assert!(!is_comfyui_exif_value("Canon EOS"));
+        assert!(!is_comfyui_exif_value(""));
+    }
+
+    #[test]
+    fn comfyui_prompt_in_make_preferred_over_workflow_in_imagedescription() {
+        // Mirrors `ComfyUI-euler-1.0-4-2025-09-24 19-12-57-0082.jpg`: the
+        // workflow graph lives in EXIF ImageDescription as `Workflow:{...}` and
+        // the executed prompt in Make as `Prompt:{...}` (capitalised). The
+        // detector must surface the *prompt* (which carries the text), not the
+        // workflow graph first.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cap.jpg");
+        {
+            let img = image::RgbImage::from_pixel(16, 16, image::Rgb([1, 2, 3]));
+            img.save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let prompt_json = r#"{"104":{"inputs":{"text":"a fluffy cat on a beach"},"class_type":"CLIPTextEncode"}}"#;
+        let workflow_json = r#"{"id":"wf","nodes":[{"type":"CLIPTextEncode"}]}"#;
+        // Make = Prompt:…, ImageDescription = Workflow:… (capitalised)
+        let tiff = build_tiff_ascii(&[
+            ("Make", &format!("Prompt:{prompt_json}")),
+            ("ImageDescription", &format!("Workflow:{workflow_json}")),
+        ]);
+        let mut exif_payload = b"Exif\0\0".to_vec();
+        exif_payload.extend_from_slice(&tiff);
+        let seg = jpeg_meta::JpegSegment {
+            marker: 0xE1,
+            data: exif_payload,
+        };
+        let with_exif = jpeg_meta::merge_missing_segments(&bytes, std::slice::from_ref(&seg));
+        std::fs::write(&path, &with_exif).unwrap();
+
+        assert!(find_jpeg_prompt_marker(&std::fs::read(&path).unwrap()));
+        let meta = get_metadata(path.to_str().unwrap()).unwrap();
+        let ai = meta
+            .ai
+            .expect("capitalised ComfyUI prompt must be detected");
+        assert_eq!(ai.source, "ComfyUI");
+        assert!(
+            ai.prompt.contains("a fluffy cat on a beach"),
+            "the prompt payload must win over the workflow graph"
+        );
+        // The workflow graph must not be lost — it rides along in params.
+        assert!(ai.params.contains("\"nodes\""));
+        // The multi-KB Make/ImageDescription blobs are hidden from the EXIF
+        // table (they surface in the AI block instead).
+        assert!(!meta.exif.iter().any(|e| e.key == "Make"));
+        assert!(!meta.exif.iter().any(|e| e.key == "ImageDescription"));
     }
 
     #[test]
@@ -1176,6 +1267,16 @@ mod tests {
 
     /// `read_exif` must not error on files without EXIF and must find a known
     /// field on a synthetic JPEG that carries one.
+    #[test]
+    fn parse_comfyui_qwen_image_prompt_field() {
+        // Qwen-Image workflows (TextEncodeQwenImage*) keep the prompt in
+        // `inputs.prompt` instead of `inputs.text`.
+        let json = r#"{"104":{"inputs":{"prompt":"a cat on a beach","clip":["38",0]},"class_type":"TextEncodeQwenImageEditPlus"}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert!(info.prompt.contains("a cat on a beach"));
+        assert_eq!(info.source, "ComfyUI");
+    }
+
     #[test]
     fn exif_reads_only_what_is_there() {
         let dir = tempfile::tempdir().unwrap();

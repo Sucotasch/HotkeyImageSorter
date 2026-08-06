@@ -7,8 +7,8 @@ use std::time::SystemTime;
 /// can't be renamed into a format the app no longer lists). Decodable by the
 /// `image` crate with the enabled features: default formats + AVIF (decoder
 /// via dav1d through the `avif-native` feature, encoder via ravif).
-const SUPPORTED_EXTENSIONS: [&str; 10] = [
-    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "ico", "avif",
+const SUPPORTED_EXTENSIONS: [&str; 11] = [
+    "jpg", "jpeg", "jif", "png", "gif", "webp", "bmp", "tif", "tiff", "ico", "avif",
 ];
 
 pub fn list_images(dir_path: &str) -> Vec<ImageInfo> {
