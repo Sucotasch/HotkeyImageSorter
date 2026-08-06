@@ -24,6 +24,17 @@ pub fn get_metadata(path: &str) -> Result<ImageMetadata, String> {
 
     let ai = detect_ai_prompt(&exif, &text_chunks, &comments);
 
+    // ComfyUI stores its `workflow:`/`prompt:` JSON blobs in EXIF Make/Model.
+    // Those are surfaced in the AI section, so keep the multi-KB strings out
+    // of the EXIF table.
+    let exif_display: Vec<MetadataEntry> = exif
+        .iter()
+        .filter(|e| {
+            !(matches!(e.key.as_str(), "Make" | "Model") && is_comfyui_exif_value(&e.value))
+        })
+        .cloned()
+        .collect();
+
     Ok(ImageMetadata {
         name,
         path: path.to_string(),
@@ -35,7 +46,7 @@ pub fn get_metadata(path: &str) -> Result<ImageMetadata, String> {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0),
-        exif,
+        exif: exif_display,
         text_chunks: text_chunks
             .iter()
             .map(|c| MetadataEntry {
@@ -75,7 +86,7 @@ fn read_exif(path: &str) -> Result<Vec<MetadataEntry>, String> {
 
     let mut out = Vec::new();
     for f in exif.fields() {
-        let value = f.display_value().to_string();
+        let value = field_value_to_string(f);
         if value.is_empty() {
             continue;
         }
@@ -87,6 +98,47 @@ fn read_exif(path: &str) -> Result<Vec<MetadataEntry>, String> {
     // Also expose the EXIF IFD name so the UI can group them.
     out.sort_by(|a, b| a.key.cmp(&b.key));
     Ok(out)
+}
+
+/// Renders an EXIF field value as plain text. kamadak-exif's `display_value()`
+/// wraps ASCII/UNDEFINED strings in quotes and escapes, which would garble
+/// e.g. ComfyUI's `workflow:{...}` JSON stored in EXIF Make/Model, so those
+/// are decoded directly from the raw `Value`.
+fn field_value_to_string(f: &exif::Field) -> String {
+    match &f.value {
+        exif::Value::Ascii(parts) => parts
+            .iter()
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        exif::Value::Undefined(bytes, _) => decode_undefined_text(bytes),
+        _ => f.display_value().to_string(),
+    }
+}
+
+/// Best-effort text decoding of an EXIF UNDEFINED payload. UserComment is type
+/// UNDEFINED and starts with an 8-byte charset header ("UNICODE\0",
+/// "ASCII\0\0\0", …) followed by the actual text.
+fn decode_undefined_text(bytes: &[u8]) -> String {
+    if let Some(body) = bytes.strip_prefix(b"UNICODE\0") {
+        let le: Vec<u16> = body
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        if let Ok(s) = String::from_utf16(&le) {
+            return s;
+        }
+        let be: Vec<u16> = body
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        if let Ok(s) = String::from_utf16(&be) {
+            return s;
+        }
+        return String::from_utf8_lossy(body).into_owned();
+    }
+    // "ASCII\0\0\0", "JIS\0\0\0\0" or plain text — decode as-is
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// Returns the payload of every COM (comment) segment of a JPEG. Non-JPEG
@@ -212,15 +264,18 @@ fn find_jpeg_prompt_marker(bytes: &[u8]) -> bool {
         return true;
     }
     // EXIF: some tools store the prompt in UserComment or ImageDescription
-    // rather than a COM segment. Parse only the APP1 EXIF blob via kamadak-exif.
+    // rather than a COM segment; ComfyUI puts `workflow:`/`prompt:` JSON in
+    // Make/Model. Parse only the APP1 EXIF blob via kamadak-exif.
     for seg in &segments {
         if seg.marker == 0xE1 && seg.data.starts_with(b"Exif\0\0") {
             if let Some(exif) = parse_exif_bytes(&seg.data) {
                 for field in exif {
-                    if matches!(
-                        field.key.to_ascii_lowercase().as_str(),
-                        "usercomment" | "imagedescription"
-                    ) && looks_like_a1111(&field.value)
+                    let k = field.key.to_ascii_lowercase();
+                    if (k == "make" || k == "model") && is_comfyui_exif_value(&field.value) {
+                        return true;
+                    }
+                    if (k == "usercomment" || k == "imagedescription")
+                        && looks_like_a1111(&field.value)
                     {
                         return true;
                     }
@@ -242,7 +297,7 @@ fn parse_exif_bytes(data: &[u8]) -> Option<Vec<MetadataEntry>> {
     let exif = exif::Reader::new().read_from_container(&mut cursor).ok()?;
     let mut out = Vec::new();
     for f in exif.fields() {
-        let value = f.display_value().to_string();
+        let value = field_value_to_string(f);
         if !value.is_empty() {
             out.push(MetadataEntry {
                 key: f.tag.to_string(),
@@ -301,22 +356,70 @@ fn detect_ai_prompt(
             .find(|e| e.key.eq_ignore_ascii_case(key))
             .map(|e| e.value.clone())
     };
-    let user_comment = exif_lookup("UserComment").filter(|v| looks_like_a1111(v));
+    let user_comment = exif_lookup("UserComment");
     if let Some(uc) = user_comment {
-        if let Some(info) = parse_a1111_parameters(&uc) {
+        if let Some(info) = parse_comfyui_exif(&uc) {
             return Some(info);
+        }
+        if looks_like_a1111(&uc) {
+            if let Some(info) = parse_a1111_parameters(&uc) {
+                return Some(info);
+            }
         }
     }
     let description = exif_lookup("ImageDescription");
     if let Some(desc) = description {
+        if let Some(info) = parse_comfyui_exif(&desc) {
+            return Some(info);
+        }
         if looks_like_a1111(&desc) {
             if let Some(info) = parse_a1111_parameters(&desc) {
                 return Some(info);
             }
         }
     }
+    // ComfyUI JPEG convention: EXIF Make holds `workflow:{json}` and Model
+    // holds `prompt:{json}`. Prefer the `prompt` payload — it carries the
+    // executed prompt texts — before falling back to the UI workflow graph.
+    for key in ["Make", "Model"] {
+        if let Some(v) = exif_lookup(key) {
+            if let Some(json) = v.trim().strip_prefix("prompt:") {
+                if let Some(info) = parse_comfyui_json("prompt", json) {
+                    return Some(info);
+                }
+            }
+        }
+    }
+    for key in ["Make", "Model"] {
+        if let Some(v) = exif_lookup(key) {
+            if let Some(json) = v.trim().strip_prefix("workflow:") {
+                if let Some(info) = parse_comfyui_json("workflow", json) {
+                    return Some(info);
+                }
+            }
+        }
+    }
 
     None
+}
+
+/// Parses ComfyUI's `key:{json}` EXIF payloads (`prompt:`/`workflow:`
+/// prefixes) that some JPEG writers store in Make, Model or UserComment.
+fn parse_comfyui_exif(value: &str) -> Option<AiPromptInfo> {
+    let v = value.trim();
+    if let Some(json) = v.strip_prefix("prompt:") {
+        return parse_comfyui_json("prompt", json);
+    }
+    if let Some(json) = v.strip_prefix("workflow:") {
+        return parse_comfyui_json("workflow", json);
+    }
+    None
+}
+
+/// True when the value is a ComfyUI `prompt:`/`workflow:` JSON payload.
+fn is_comfyui_exif_value(value: &str) -> bool {
+    let v = value.trim_start();
+    v.starts_with("prompt:") || v.starts_with("workflow:")
 }
 
 /// Heuristic: does this text look like an A1111 `parameters` payload?
@@ -519,6 +622,89 @@ mod tests {
             find_jpeg_prompt_marker(&after),
             "prompt stored in EXIF ImageDescription must be detected"
         );
+    }
+
+    /// Builds a minimal little-endian TIFF with the given ASCII fields, values
+    /// appended after the IFD (mirrors how ComfyUI writes `workflow:`/`prompt:`
+    /// into EXIF Make/Model).
+    fn build_tiff_ascii(fields: &[(&str, &str)]) -> Vec<u8> {
+        let mut tiff = b"II*\0".to_vec();
+        tiff.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset
+        tiff.extend_from_slice(&(fields.len() as u16).to_le_bytes());
+        let data_off = 8 + 2 + fields.len() * 12 + 4;
+        let mut data = Vec::new();
+        for (name, value) in fields {
+            let tag = match *name {
+                "Make" => 0x010Fu16,
+                "Model" => 0x0110,
+                "ImageDescription" => 0x010E,
+                _ => 0x010F,
+            };
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&2u16.to_le_bytes()); // ASCII
+            tiff.extend_from_slice(&((value.len() + 1) as u32).to_le_bytes()); // incl. NUL
+            tiff.extend_from_slice(&((data_off + data.len()) as u32).to_le_bytes());
+            data.extend_from_slice(value.as_bytes());
+            data.push(0);
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+        tiff.extend_from_slice(&data);
+        tiff
+    }
+
+    #[test]
+    fn jpeg_comfyui_make_model_prompt_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comfy.jpg");
+        {
+            let img = image::RgbImage::from_pixel(16, 16, image::Rgb([1, 2, 3]));
+            img.save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let prompt_json = r#"{"250":{"inputs":{"text":"a red car driving","clip":["471",0]},"class_type":"CLIPTextEncode","_meta":{"title":"CLIP Text Encode (Prompt)"}}}"#;
+        let workflow_json = r#"{"id":"abc","nodes":[{"type":"CLIPTextEncode","inputs":[]}]}"#;
+        let tiff = build_tiff_ascii(&[
+            ("Make", &format!("workflow:{workflow_json}")),
+            ("Model", &format!("prompt:{prompt_json}")),
+        ]);
+        let mut exif_payload = b"Exif\0\0".to_vec();
+        exif_payload.extend_from_slice(&tiff);
+        let seg = jpeg_meta::JpegSegment {
+            marker: 0xE1,
+            data: exif_payload,
+        };
+        let with_exif = jpeg_meta::merge_missing_segments(&bytes, std::slice::from_ref(&seg));
+        std::fs::write(&path, &with_exif).unwrap();
+
+        // Badge-level detection
+        assert!(find_jpeg_prompt_marker(&std::fs::read(&path).unwrap()));
+
+        // Full metadata: prompt parsed from the Model `prompt:` payload
+        let meta = get_metadata(path.to_str().unwrap()).unwrap();
+        let ai = meta
+            .ai
+            .expect("ComfyUI prompt in EXIF Make/Model must be detected");
+        assert_eq!(ai.source, "ComfyUI");
+        assert!(ai.prompt.contains("a red car driving"));
+        // The multi-KB Make/Model blobs are hidden from the EXIF table
+        assert!(!meta.exif.iter().any(|e| e.key == "Make"));
+        assert!(!meta.exif.iter().any(|e| e.key == "Model"));
+    }
+
+    #[test]
+    fn parse_comfyui_exif_prefixes() {
+        let prompt_json =
+            r#"{"1":{"inputs":{"text":"hello world"},"class_type":"CLIPTextEncode"}}"#;
+        let info = parse_comfyui_exif(&format!("prompt:{prompt_json}")).unwrap();
+        assert_eq!(info.source, "ComfyUI");
+        assert!(info.prompt.contains("hello world"));
+
+        let wf = parse_comfyui_exif(r#"workflow:{"id":"x"}"#).unwrap();
+        assert_eq!(wf.source, "ComfyUI");
+        assert!(wf.raw.contains("\"id\""));
+
+        assert!(parse_comfyui_exif("Steps: 20, Sampler: Euler").is_none());
     }
 
     #[test]
