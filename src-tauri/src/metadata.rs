@@ -81,7 +81,21 @@ fn read_exif(path: &str) -> Result<Vec<MetadataEntry>, String> {
     let mut buf = BufReader::new(file);
     let exif = match exif::Reader::new().read_from_container(&mut buf) {
         Ok(e) => e,
-        Err(_) => return Ok(Vec::new()),
+        // Some writers overlap the "next IFD" pointer with value data, which
+        // the strict kamadak-exif rejects — fall back to the tolerant reader.
+        Err(_) => {
+            let Ok(bytes) = std::fs::read(path) else {
+                return Ok(Vec::new());
+            };
+            let mut out = Vec::new();
+            for seg in jpeg_meta::extract_segments(&bytes) {
+                if seg.marker == 0xE1 {
+                    out.extend(extract_exif_text_fields(&seg.data));
+                }
+            }
+            out.sort_by(|a, b| a.key.cmp(&b.key));
+            return Ok(out);
+        }
     };
 
     let mut out = Vec::new();
@@ -133,25 +147,53 @@ fn decode_undefined_text(bytes: &[u8]) -> String {
         (None, bytes)
     };
     match charset {
-        Some(b"UNICODE\0") => {
-            let le: Vec<u16> = body
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            if let Ok(s) = String::from_utf16(&le) {
-                return s;
-            }
-            let be: Vec<u16> = body
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
-                .collect();
-            if let Ok(s) = String::from_utf16(&be) {
-                return s;
-            }
-            String::from_utf8_lossy(body).into_owned()
-        }
+        Some(b"UNICODE\0") => decode_utf16(body),
         Some(b"ASCII\0\0\0") | Some(b"JIS\0\0\0\0") => String::from_utf8_lossy(body).into_owned(),
         _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// Decodes a UTF-16 payload (EXIF "UNICODE\0" UserComment). The byte order is
+/// not reliably declared, so it is detected: ASCII/Latin text has a NUL byte in
+/// every pair — at even offsets when big-endian, at odd offsets when
+/// little-endian. When that is ambiguous (e.g. Cyrillic-only text), the EXIF
+/// spec's big-endian interpretation is preferred and the reading with fewer
+/// control characters wins.
+fn decode_utf16(body: &[u8]) -> String {
+    let n = body.len() / 2;
+    if n == 0 {
+        return String::new();
+    }
+    let be_units: Vec<u16> = body[..n * 2]
+        .chunks_exact(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .collect();
+    let be_str = String::from_utf16(&be_units).unwrap_or_default();
+    let le_units: Vec<u16> = body[..n * 2]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let le_str = String::from_utf16(&le_units).unwrap_or_default();
+
+    let even_nuls = body.iter().step_by(2).filter(|&&b| b == 0).count();
+    let odd_nuls = body.iter().skip(1).step_by(2).filter(|&&b| b == 0).count();
+    if even_nuls > odd_nuls * 2 {
+        return be_str;
+    }
+    if odd_nuls > even_nuls * 2 {
+        return le_str;
+    }
+    // Ambiguous (non-ASCII text): prefer big-endian per the EXIF spec, unless
+    // it is riddled with control characters.
+    let controls = |s: &str| {
+        s.chars()
+            .filter(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+            .count()
+    };
+    if controls(&be_str) <= controls(&le_str) {
+        be_str
+    } else {
+        le_str
     }
 }
 
@@ -305,21 +347,148 @@ fn find_jpeg_prompt_marker(bytes: &[u8]) -> bool {
 /// header is stripped so the remainder is a bare TIFF structure that
 /// `read_from_container` can recognise.
 fn parse_exif_bytes(data: &[u8]) -> Option<Vec<MetadataEntry>> {
-    use std::io::Cursor;
-    let tiff = data.strip_prefix(b"Exif\0\0").unwrap_or(data);
-    let mut cursor = Cursor::new(tiff);
-    let exif = exif::Reader::new().read_from_container(&mut cursor).ok()?;
-    let mut out = Vec::new();
-    for f in exif.fields() {
-        let value = field_value_to_string(f);
-        if !value.is_empty() {
-            out.push(MetadataEntry {
-                key: f.tag.to_string(),
-                value,
-            });
-        }
+    let out = extract_exif_text_fields(data);
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
-    Some(out)
+}
+
+/// Tolerant reader for the EXIF text fields we care about (Make, Model,
+/// ImageDescription, UserComment, Software). Some real-world writers place the
+/// first value directly after the IFD entries — overlapping the "next IFD"
+/// pointer — which makes strict parsers like kamadak-exif fail with
+/// "Unexpected next IFD". This walker never errors: every read is
+/// bounds-checked and only plausible pointers are followed.
+fn extract_exif_text_fields(payload: &[u8]) -> Vec<MetadataEntry> {
+    let mut out = Vec::new();
+    let Some(tiff) = payload.strip_prefix(b"Exif\0\0") else {
+        return out;
+    };
+    if tiff.len() < 8 {
+        return out;
+    }
+    let le = match &tiff[..2] {
+        b"II" => true,
+        b"MM" => false,
+        _ => return out,
+    };
+    let ifd0 = read_exif_u32(tiff, 4, le).unwrap_or(0) as usize;
+    walk_exif_ifd(tiff, ifd0, true, le, &mut out);
+    out
+}
+
+fn read_exif_u16(data: &[u8], off: usize, le: bool) -> Option<u16> {
+    let b = data.get(off..off + 2)?;
+    Some(if le {
+        u16::from_le_bytes([b[0], b[1]])
+    } else {
+        u16::from_be_bytes([b[0], b[1]])
+    })
+}
+
+fn read_exif_u32(data: &[u8], off: usize, le: bool) -> Option<u32> {
+    let b = data.get(off..off + 4)?;
+    Some(if le {
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    } else {
+        u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+    })
+}
+
+fn walk_exif_ifd(
+    tiff: &[u8],
+    offset: usize,
+    follow_next: bool,
+    le: bool,
+    out: &mut Vec<MetadataEntry>,
+) {
+    let mut off = offset;
+    let mut guard = 0;
+    while off > 0 && off + 2 <= tiff.len() && guard < 8 {
+        guard += 1;
+        let Some(count) = read_exif_u16(tiff, off, le) else {
+            return;
+        };
+        let count = count as usize;
+        if off + 2 + count * 12 + 4 > tiff.len() {
+            return;
+        }
+        for k in 0..count {
+            let e = off + 2 + k * 12;
+            let Some(tag) = read_exif_u16(tiff, e, le) else {
+                return;
+            };
+            let Some(typ) = read_exif_u16(tiff, e + 2, le) else {
+                return;
+            };
+            let Some(cnt) = read_exif_u32(tiff, e + 4, le) else {
+                return;
+            };
+            let Some(val) = read_exif_u32(tiff, e + 8, le) else {
+                return;
+            };
+            // Follow the ExifOffset pointer (IFD0 -> Exif sub-IFD).
+            if tag == 0x8769 && typ == 4 && cnt == 1 {
+                walk_exif_ifd(tiff, val as usize, false, le, out);
+                continue;
+            }
+            let key = match tag {
+                0x010E => "ImageDescription",
+                0x010F => "Make",
+                0x0110 => "Model",
+                0x0131 => "Software",
+                0x9286 => "UserComment",
+                _ => continue,
+            };
+            let size: usize = match typ {
+                1 | 2 | 7 => 1,
+                3 => 2,
+                4 | 9 => 4,
+                5 | 10 => 8,
+                _ => continue,
+            };
+            let byte_len = size.saturating_mul(cnt as usize);
+            let raw: &[u8] = if byte_len <= 4 {
+                &tiff[e + 8..(e + 8 + byte_len).min(tiff.len())]
+            } else {
+                let start = val as usize;
+                let end = start.saturating_add(byte_len).min(tiff.len());
+                if start >= tiff.len() {
+                    continue;
+                }
+                &tiff[start..end]
+            };
+            let value = match typ {
+                2 => {
+                    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+                    String::from_utf8_lossy(&raw[..end]).into_owned()
+                }
+                7 => decode_undefined_text(raw),
+                _ => continue,
+            };
+            if !value.is_empty() {
+                out.push(MetadataEntry {
+                    key: key.to_string(),
+                    value,
+                });
+            }
+        }
+        if !follow_next {
+            return;
+        }
+        let Some(next) = read_exif_u32(tiff, off + 2 + count * 12, le) else {
+            return;
+        };
+        let next = next as usize;
+        // A non-zero "next IFD" is often the start of value data overlapping
+        // this field — stop unless it points at a plausible IFD.
+        if next == 0 || next + 2 > tiff.len() {
+            return;
+        }
+        off = next;
+    }
 }
 
 /// Detect and parse AI-generation prompts stored in the image.
@@ -646,6 +815,158 @@ mod tests {
             find_jpeg_prompt_marker(&after),
             "prompt stored in EXIF ImageDescription must be detected"
         );
+    }
+
+    /// Builds a little-endian TIFF with an IFD0 that points (via ExifOffset)
+    /// at a sub-IFD holding one UserComment (type UNDEFINED) with a
+    /// `UNICODE\0` charset header followed by UTF-16 text — the layout some
+    /// tools (e.g. A1111-era writers) use.
+    fn build_tiff_with_utf16_usercomment(text: &str) -> Vec<u8> {
+        let mut body = b"UNICODE\0".to_vec();
+        for u in text.encode_utf16() {
+            body.extend_from_slice(&u.to_be_bytes());
+        }
+        let mut tiff = b"II*\0".to_vec();
+        tiff.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset
+        tiff.extend_from_slice(&1u16.to_le_bytes()); // 1 entry
+        let sub_ifd_off = 26u32; // 8 + 2 + 12 + 4
+                                 // ExifOffset (0x8769), type 4, count 1 -> sub-IFD
+        tiff.extend_from_slice(&0x8769u16.to_le_bytes());
+        tiff.extend_from_slice(&4u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&sub_ifd_off.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // next IFD0 = 0
+                                                     // Sub-IFD @ 26: UserComment (0x9286), type 7, count = body len
+        let uc_off = sub_ifd_off + 2 + 12 + 4;
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x9286u16.to_le_bytes());
+        tiff.extend_from_slice(&7u16.to_le_bytes());
+        tiff.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        tiff.extend_from_slice(&uc_off.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // next sub-IFD = 0
+        tiff.extend_from_slice(&body);
+        tiff
+    }
+
+    #[test]
+    fn decode_undefined_utf16_be() {
+        // A1111 stores prompts in EXIF UserComment as UTF-16BE under UNICODE\0
+        let mut bytes = b"UNICODE\0".to_vec();
+        for u in "masterpiece, best quality\nNegative prompt: blurry\nSteps: 28".encode_utf16() {
+            bytes.extend_from_slice(&u.to_be_bytes());
+        }
+        let out = decode_undefined_text(&bytes);
+        assert!(out.starts_with("masterpiece"));
+        assert!(out.contains("Negative prompt:"));
+        assert!(out.contains("Steps: 28"));
+    }
+
+    #[test]
+    fn decode_undefined_utf16_le() {
+        let mut bytes = b"UNICODE\0".to_vec();
+        for u in "Steps: 20, Sampler: Euler".encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        let out = decode_undefined_text(&bytes);
+        assert!(out.contains("Steps: 20"));
+    }
+
+    #[test]
+    fn jpeg_utf16_usercomment_prompt_detected() {
+        // A1111 "parameters" text stored as UTF-16BE in EXIF UserComment (in
+        // the Exif sub-IFD), like the `103876708.jpeg` sample.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uc.jpg");
+        {
+            let img = image::RgbImage::from_pixel(16, 16, image::Rgb([1, 2, 3]));
+            img.save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let text = "tkmi2, masterpiece, best quality\nNegative prompt: blurry, low quality\nSteps: 34, Sampler: Euler a, CFG scale: 4.0, Seed: 1, Version: 1.10.1";
+        let tiff = build_tiff_with_utf16_usercomment(text);
+        let mut exif_payload = b"Exif\0\0".to_vec();
+        exif_payload.extend_from_slice(&tiff);
+        let seg = jpeg_meta::JpegSegment {
+            marker: 0xE1,
+            data: exif_payload,
+        };
+        let with_exif = jpeg_meta::merge_missing_segments(&bytes, std::slice::from_ref(&seg));
+        std::fs::write(&path, &with_exif).unwrap();
+
+        assert!(find_jpeg_prompt_marker(&std::fs::read(&path).unwrap()));
+        let meta = get_metadata(path.to_str().unwrap()).unwrap();
+        let ai = meta
+            .ai
+            .expect("UTF-16BE UserComment prompt must be detected");
+        assert_eq!(ai.source, "AUTOMATIC1111");
+        assert!(ai.prompt.contains("tkmi2, masterpiece"));
+        assert!(ai.params.contains("Steps: 34"));
+        assert!(ai.negative_prompt.as_deref().unwrap().contains("blurry"));
+    }
+
+    #[test]
+    fn tolerant_reader_handles_overlapping_next_ifd() {
+        // Mimics the real `103876708.jpeg`: the UserComment value starts right
+        // after the entry, overlapping the "next IFD" pointer. kamadak-exif
+        // rejects this with "Unexpected next IFD"; the tolerant reader must
+        // still extract the prompt.
+        let mut body = b"UNICODE\0".to_vec();
+        for u in
+            "tkmi2, masterpiece, best quality\nNegative prompt: blurry\nSteps: 34".encode_utf16()
+        {
+            body.extend_from_slice(&u.to_be_bytes());
+        }
+        let mut tiff = b"II*\0".to_vec();
+        tiff.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        let sub_ifd_off = 26u32;
+        tiff.extend_from_slice(&0x8769u16.to_le_bytes()); // ExifOffset
+        tiff.extend_from_slice(&4u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&sub_ifd_off.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // IFD0 next = 0
+                                                     // Sub-IFD @ 26
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x9286u16.to_le_bytes()); // UserComment
+        tiff.extend_from_slice(&7u16.to_le_bytes());
+        tiff.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        // Value offset 40 overlaps the "next IFD" field of the sub-IFD
+        tiff.extend_from_slice(&40u32.to_le_bytes());
+        tiff.extend_from_slice(&body);
+
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+        let fields = extract_exif_text_fields(&payload);
+        let uc = fields
+            .iter()
+            .find(|f| f.key == "UserComment")
+            .expect("UserComment must be read by the tolerant reader");
+        assert!(uc.value.contains("tkmi2, masterpiece"));
+
+        // End-to-end via a JPEG: badge + metadata
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overlap.jpg");
+        {
+            let img = image::RgbImage::from_pixel(16, 16, image::Rgb([1, 2, 3]));
+            img.save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let seg = jpeg_meta::JpegSegment {
+            marker: 0xE1,
+            data: payload,
+        };
+        let with_exif = jpeg_meta::merge_missing_segments(&bytes, std::slice::from_ref(&seg));
+        std::fs::write(&path, &with_exif).unwrap();
+
+        assert!(find_jpeg_prompt_marker(&std::fs::read(&path).unwrap()));
+        let meta = get_metadata(path.to_str().unwrap()).unwrap();
+        let ai = meta
+            .ai
+            .expect("overlapping next-IFD UserComment prompt must be detected");
+        assert_eq!(ai.source, "AUTOMATIC1111");
+        assert!(ai.prompt.contains("tkmi2, masterpiece"));
     }
 
     /// Builds a minimal little-endian TIFF with the given ASCII fields, values
