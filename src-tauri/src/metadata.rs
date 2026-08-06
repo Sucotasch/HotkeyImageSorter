@@ -103,42 +103,56 @@ fn read_exif(path: &str) -> Result<Vec<MetadataEntry>, String> {
 /// Renders an EXIF field value as plain text. kamadak-exif's `display_value()`
 /// wraps ASCII/UNDEFINED strings in quotes and escapes, which would garble
 /// e.g. ComfyUI's `workflow:{...}` JSON stored in EXIF Make/Model, so those
-/// are decoded directly from the raw `Value`.
+/// fields are decoded directly from the raw `Value`. Every other tag keeps
+/// its tag-specific `display_value` formatting (ExifVersion → "2.31", etc.).
 fn field_value_to_string(f: &exif::Field) -> String {
-    match &f.value {
-        exif::Value::Ascii(parts) => parts
-            .iter()
-            .map(|p| String::from_utf8_lossy(p).into_owned())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        exif::Value::Undefined(bytes, _) => decode_undefined_text(bytes),
+    match f.tag {
+        exif::Tag::Make
+        | exif::Tag::Model
+        | exif::Tag::UserComment
+        | exif::Tag::ImageDescription => match &f.value {
+            exif::Value::Ascii(parts) => parts
+                .iter()
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            exif::Value::Undefined(bytes, _) => decode_undefined_text(bytes),
+            _ => f.display_value().to_string(),
+        },
         _ => f.display_value().to_string(),
     }
 }
 
 /// Best-effort text decoding of an EXIF UNDEFINED payload. UserComment is type
 /// UNDEFINED and starts with an 8-byte charset header ("UNICODE\0",
-/// "ASCII\0\0\0", …) followed by the actual text.
+/// "ASCII\0\0\0", …) followed by the actual text; the header is stripped.
 fn decode_undefined_text(bytes: &[u8]) -> String {
-    if let Some(body) = bytes.strip_prefix(b"UNICODE\0") {
-        let le: Vec<u16> = body
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        if let Ok(s) = String::from_utf16(&le) {
-            return s;
+    let (charset, body) = if bytes.len() >= 8 {
+        (Some(&bytes[..8]), &bytes[8..])
+    } else {
+        (None, bytes)
+    };
+    match charset {
+        Some(b"UNICODE\0") => {
+            let le: Vec<u16> = body
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            if let Ok(s) = String::from_utf16(&le) {
+                return s;
+            }
+            let be: Vec<u16> = body
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+            if let Ok(s) = String::from_utf16(&be) {
+                return s;
+            }
+            String::from_utf8_lossy(body).into_owned()
         }
-        let be: Vec<u16> = body
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
-            .collect();
-        if let Ok(s) = String::from_utf16(&be) {
-            return s;
-        }
-        return String::from_utf8_lossy(body).into_owned();
+        Some(b"ASCII\0\0\0") | Some(b"JIS\0\0\0\0") => String::from_utf8_lossy(body).into_owned(),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
     }
-    // "ASCII\0\0\0", "JIS\0\0\0\0" or plain text — decode as-is
-    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// Returns the payload of every COM (comment) segment of a JPEG. Non-JPEG
@@ -380,23 +394,33 @@ fn detect_ai_prompt(
     }
     // ComfyUI JPEG convention: EXIF Make holds `workflow:{json}` and Model
     // holds `prompt:{json}`. Prefer the `prompt` payload — it carries the
-    // executed prompt texts — before falling back to the UI workflow graph.
+    // executed prompt texts — and keep the UI workflow graph visible too
+    // (it is hidden from the EXIF table, so it must surface in the AI block).
+    let mut workflow_json: Option<String> = None;
     for key in ["Make", "Model"] {
         if let Some(v) = exif_lookup(key) {
-            if let Some(json) = v.trim().strip_prefix("prompt:") {
-                if let Some(info) = parse_comfyui_json("prompt", json) {
-                    return Some(info);
+            if let Some(json) = v.trim().strip_prefix("workflow:") {
+                if json.trim_start().starts_with('{') {
+                    workflow_json = Some(json.to_string());
                 }
             }
         }
     }
     for key in ["Make", "Model"] {
         if let Some(v) = exif_lookup(key) {
-            if let Some(json) = v.trim().strip_prefix("workflow:") {
-                if let Some(info) = parse_comfyui_json("workflow", json) {
+            if let Some(json) = v.trim().strip_prefix("prompt:") {
+                if let Some(mut info) = parse_comfyui_json("prompt", json) {
+                    if let Some(wf) = &workflow_json {
+                        info.params = wf.clone();
+                    }
                     return Some(info);
                 }
             }
+        }
+    }
+    if let Some(wf) = &workflow_json {
+        if let Some(info) = parse_comfyui_json("workflow", wf) {
+            return Some(info);
         }
     }
 
@@ -687,6 +711,8 @@ mod tests {
             .expect("ComfyUI prompt in EXIF Make/Model must be detected");
         assert_eq!(ai.source, "ComfyUI");
         assert!(ai.prompt.contains("a red car driving"));
+        // The workflow graph from Make must not be lost
+        assert!(ai.params.contains("\"nodes\""));
         // The multi-KB Make/Model blobs are hidden from the EXIF table
         assert!(!meta.exif.iter().any(|e| e.key == "Make"));
         assert!(!meta.exif.iter().any(|e| e.key == "Model"));
