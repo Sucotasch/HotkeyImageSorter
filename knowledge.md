@@ -7,7 +7,7 @@ This file gives Freebuff context about your project: goals, commands, convention
 - **Setup**: `npm install` (only `@tauri-apps/cli` as devDep; runtime plugins: dialog, single-instance, window-state).
 - **Dev**: `npm run dev` (runs `tauri dev`)
 - **Build**: `npm run build` (runs `tauri build`)
-- **Test**: `cd src-tauri && cargo test` (51 Rust tests) · `npm test` (20 JS tests, `node --test test/*.test.js`, needs Node ≥ 21)
+- **Test**: `cd src-tauri && cargo test` (53 Rust tests) · `npm test` (20 JS tests, `node --test test/*.test.js`, needs Node ≥ 21)
 - **Native build note**: `cargo build` compiles `dav1d-sys` (vendored, AVIF decode) and `turbojpeg-sys` (vendored libjpeg-turbo, lossless JPEG rotation). Both need MSVC + nasm + cmake + pkg-config + meson/ninja (see below). First build takes a few minutes.
 
 ## Architecture
@@ -49,4 +49,5 @@ This file gives Freebuff context about your project: goals, commands, convention
 - **Windows dev**: needs WebView2 (usually preinstalled) + VS Build Tools (C++ workload). Linux needs webkit2gtk-4.1 dev packages (see README).
 - **Native build gotchas (Windows)**: `src-tauri/vendor/dav1d-sys` is a patched copy of dav1d-sys 0.8.3 (`[patch.crates-io]`). Its `build.rs` finds `vcvars64.bat`, builds dav1d with **MSVC cl** (MinGW-built libdav1d.a won't link), disables tools/tests (windres breaks on paths with spaces). `turbojpeg-sys` needs **cmake + nasm**. Tool binaries: nasm (`D:\c\Tools\nasm\nasm-3.02`), pkg-config-lite (`D:\c\Tools\pkgconfig\pkg-config-lite-0.28-1\bin`), meson+ninja pip (`D:\Works\Python\Scripts`). The repo's bash maps `/c/` to `d:\c\`. CI installs `meson ninja-build nasm pkg-config cmake` on ubuntu.
 - **Key handling**: global `keydown` skips when focus is in an editable element (INPUT/SELECT/TEXTAREA/contenteditable); A–Z keys move current (or multi-selected via Shift/Insert/Ctrl-click) images to configured hotkey folders; Ctrl+I opens metadata; Ctrl+R/C/Z/X are guarded by `anyModalOpen()`.
-- **AI metadata formats understood**: A1111/Forge → PNG tEXt `parameters`; ComfyUI → tEXt `prompt`/`workflow` (JSON); InvokeAI → `sd-metadata`; JPEG prompts usually in COM or EXIF UserComment/ImageDescription. `check_prompts` scans raw chunk/segment headers (fast, no pixel decode).
+- **AI metadata formats understood**: A1111/Forge → PNG tEXt `parameters`; ComfyUI → tEXt `prompt`/`workflow` (JSON) **or** JPEG EXIF `Make`=`workflow:{json}` / `Model`=`prompt:{json}` (ComfyUI JPEG convention); InvokeAI → `sd-metadata`; JPEG prompts also in COM or EXIF UserComment/ImageDescription. `check_prompts` scans raw chunk/segment headers (fast, no pixel decode).
+- **EXIF values**: don't use `field.display_value()` for text extraction — it wraps ASCII/UNDEFINED in quotes+escapes. `metadata.rs::field_value_to_string` decodes raw `Value::Ascii`/`Value::Undefined` for Make/Model/UserComment/ImageDescription (strips the 8-byte charset header on UserComment), other tags keep tag-specific display. ComfyUI Make/Model JSON blobs are hidden from the EXIF table and shown in the AI section instead.
