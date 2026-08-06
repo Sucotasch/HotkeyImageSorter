@@ -131,6 +131,11 @@ function setupEventListeners() {
   // Virtual list: re-render the window on scroll
   el.imageList.addEventListener('scroll', () => scheduleRenderWindow(), { passive: true });
 
+  // Global hotkeys (arrows, Delete, Enter, Esc, Insert, Home/End, A–Z moves,
+  // Ctrl+I/R/C/Z/X). Note: this must stay registered — a refactor removed it
+  // once, silently disabling every keyboard shortcut.
+  window.addEventListener('keydown', handleGlobalKeydown);
+
   // Delegated row events (rows are recreated per window)
   el.imageList.addEventListener('click', (e) => {
     const row = e.target.closest('.list-item');
