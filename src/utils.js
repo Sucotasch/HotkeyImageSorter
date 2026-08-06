@@ -5,6 +5,23 @@ export function basename(path) {
   return path.split(/[\\/]/).pop();
 }
 
+/**
+ * Compute the visible range of rows for a virtualized list.
+ *
+ * @param {number} scrollTop   Scroll offset of the container (px)
+ * @param {number} viewportH   Visible container height (px)
+ * @param {number} rowH        Fixed row height (px)
+ * @param {number} total       Total number of rows
+ * @param {number} overscan    Extra rows to render above/below the viewport
+ * @returns {{start: number, end: number}} Half-open range [start, end)
+ */
+export function computeVisibleRange(scrollTop, viewportH, rowH, total, overscan) {
+  if (total <= 0) return { start: 0, end: 0 };
+  const first = Math.max(0, Math.floor(scrollTop / rowH) - overscan);
+  const last = Math.min(total, Math.ceil((scrollTop + viewportH) / rowH) + overscan);
+  return { start: first, end: Math.max(first, last) };
+}
+
 export function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;',

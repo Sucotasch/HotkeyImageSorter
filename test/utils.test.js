@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { basename, escapeHtml, computeResizeRect } from '../src/utils.js';
+import { basename, escapeHtml, computeResizeRect, computeVisibleRange } from '../src/utils.js';
 
 test('basename extracts the file name from a forward-slash path', () => {
   assert.equal(basename('C:/Users/me/pics/photo.jpg'), 'photo.jpg');
@@ -79,6 +79,46 @@ test('north handle dragged up at the top edge keeps the bottom edge fixed (regre
   assert.equal(r.top, 100);
   assert.equal(r.height, 400);
   assert.equal(r.top + r.height, 500, 'bottom edge must stay at 500');
+});
+
+// Virtualized list window helpers
+const ROW_H = 32;
+
+test('computeVisibleRange covers the top rows with overscan at scroll 0', () => {
+  const r = computeVisibleRange(0, 320, ROW_H, 1000, 10);
+  assert.equal(r.start, 0);
+  assert.equal(r.end, 20); // 10 viewport rows + 10 overscan
+});
+
+test('computeVisibleRange centers the window around the scrolled position', () => {
+  // scrollTop 32*500 = row 500 at the top; viewport 10 rows, overscan 10
+  const r = computeVisibleRange(500 * ROW_H, 10 * ROW_H, ROW_H, 1000, 10);
+  assert.equal(r.start, 490);
+  assert.equal(r.end, 520);
+});
+
+test('computeVisibleRange clamps at the bottom of the list', () => {
+  const r = computeVisibleRange(995 * ROW_H, 10 * ROW_H, ROW_H, 1000, 10);
+  assert.equal(r.start, 985);
+  assert.equal(r.end, 1000);
+});
+
+test('computeVisibleRange handles a list shorter than the viewport', () => {
+  const r = computeVisibleRange(0, 500, ROW_H, 5, 10);
+  assert.equal(r.start, 0);
+  assert.equal(r.end, 5);
+});
+
+test('computeVisibleRange returns empty for an empty list', () => {
+  const r = computeVisibleRange(0, 320, ROW_H, 0, 10);
+  assert.equal(r.start, 0);
+  assert.equal(r.end, 0);
+});
+
+test('computeVisibleRange never returns start after end', () => {
+  // pathological: viewport smaller than a row, top of the list
+  const r = computeVisibleRange(2, 4, ROW_H, 100, 0);
+  assert.ok(r.start <= r.end);
 });
 
 test('north-west corner drag clamps both axes independently', () => {

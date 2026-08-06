@@ -1,4 +1,4 @@
-import { basename, escapeHtml, computeResizeRect } from './utils.js';
+import { basename, escapeHtml, computeResizeRect, computeVisibleRange } from './utils.js';
 
 const { invoke } = window.__TAURI__.core;
 const { open } = window.__TAURI__.dialog;
@@ -115,10 +115,28 @@ function setupEventListeners() {
   // Keep the crop region glued to the image when the window is resized
   window.addEventListener('resize', () => {
     if (state.isCropActive) positionCropRegion();
+    scheduleRenderWindow();
   });
   
-  // Navigation
-  window.addEventListener('keydown', handleGlobalKeydown);
+  // Virtual list: re-render the window on scroll
+  el.imageList.addEventListener('scroll', () => scheduleRenderWindow(), { passive: true });
+
+  // Delegated row events (rows are recreated per window)
+  el.imageList.addEventListener('click', (e) => {
+    const row = e.target.closest('.list-item');
+    if (!row) return;
+    const index = Number(row.dataset.index);
+    if (!Number.isInteger(index)) return;
+    handleItemClick(e, index);
+  });
+  el.imageList.addEventListener('dblclick', (e) => {
+    const row = e.target.closest('.list-item');
+    if (!row) return;
+    const index = Number(row.dataset.index);
+    if (!Number.isInteger(index)) return;
+    startRename(index, row);
+  });
+  
   
   // Sorting
   document.getElementById('sort-by').addEventListener('change', (e) => {
@@ -166,6 +184,8 @@ async function selectFolder() {
     state.folder = selected;
     state.config.last_folder = selected;
     invoke('save_config', { config: state.config });
+    // A brand-new folder starts at the top of the list
+    el.imageList.scrollTop = 0;
     loadFiles();
   }
 }
@@ -211,9 +231,8 @@ function sortAndRender(initialLoadPath = null) {
      const newIndex = state.images.findIndex(i => i.path === state.currentPath);
      if (newIndex !== -1) {
          state.currentIndex = newIndex;
-         document.querySelectorAll('.list-item').forEach((e, i) => e.classList.toggle('active', i === newIndex));
-         const activeItem = el.imageList.children[newIndex];
-         if (activeItem) activeItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+         applyRowClasses();
+         scrollIndexIntoView(newIndex);
      } else {
          selectImage(0);
      }
@@ -222,20 +241,91 @@ function sortAndRender(initialLoadPath = null) {
   }
 }
 
-// Virtual List Rendering (Simple Version)
+// Virtual List Rendering: only the visible window ± overscan rows are in the
+// DOM, absolutely positioned; the spacer sets the scroll height. This keeps
+// rendering O(visible) instead of O(total) on large folders.
+const ROW_H = 32;
+const OVERSCAN = 20;
+let listStart = 0;
+let listEnd = 0;
+
 function renderList() {
-  el.imageList.innerHTML = '';
-  state.images.forEach((img, index) => {
+  const container = el.imageList;
+  // Preserve scroll across rebuilds (e.g. rename cancel) where reasonable;
+  // the browser clamps it if the new list is shorter.
+  const prevScroll = container.scrollTop;
+  container.innerHTML = '';
+  const spacer = document.createElement('div');
+  spacer.className = 'list-spacer';
+  spacer.style.height = (state.images.length * ROW_H) + 'px';
+  container.appendChild(spacer);
+  container.scrollTop = prevScroll;
+  listStart = 0;
+  listEnd = 0;
+  scheduleRenderWindow();
+}
+
+function computeListRange() {
+  return computeVisibleRange(
+    el.imageList.scrollTop,
+    el.imageList.clientHeight,
+    ROW_H,
+    state.images.length,
+    OVERSCAN
+  );
+}
+
+function renderWindow() {
+  const container = el.imageList;
+  const { start, end } = computeListRange();
+  if (start === listStart && end === listEnd) return;
+  listStart = start;
+  listEnd = end;
+
+  container.querySelectorAll('.list-item').forEach((n) => n.remove());
+  for (let i = start; i < end; i++) {
+    const img = state.images[i];
     const div = document.createElement('div');
-    const isActive = index === state.currentIndex ? 'active' : '';
-    const isSelected = state.selectedPaths.has(img.path) ? 'selected' : '';
-    
-    div.className = `list-item ${isActive} ${isSelected}`;
+    div.className = 'list-item';
+    div.dataset.index = String(i);
+    div.style.top = (i * ROW_H) + 'px';
+    div.title = img.name;
     div.textContent = img.name;
-    div.addEventListener('click', (e) => handleItemClick(e, index));
-    div.addEventListener('dblclick', (e) => startRename(index, div));
-    el.imageList.appendChild(div);
+    container.appendChild(div);
+  }
+  applyRowClasses();
+}
+
+// Refresh active/selected classes for the currently rendered window.
+function applyRowClasses() {
+  el.imageList.querySelectorAll('.list-item').forEach((row) => {
+    const i = Number(row.dataset.index);
+    const img = state.images[i];
+    row.classList.toggle('active', i === state.currentIndex);
+    row.classList.toggle('selected', state.selectedPaths.has(img.path));
   });
+}
+
+let windowRaf = null;
+function scheduleRenderWindow() {
+  if (windowRaf) return;
+  windowRaf = requestAnimationFrame(() => {
+    windowRaf = null;
+    // Don't rebuild the row that holds an active inline-rename input
+    if (renamingIndex !== -1) return;
+    renderWindow();
+  });
+}
+
+// Ensure row `index` is visible, scrolling the container if needed.
+function scrollIndexIntoView(index) {
+  const container = el.imageList;
+  const rowTop = index * ROW_H;
+  const viewportH = container.clientHeight;
+  if (rowTop < container.scrollTop || rowTop + ROW_H > container.scrollTop + viewportH) {
+    container.scrollTop = Math.max(0, rowTop - (viewportH - ROW_H) / 2);
+  }
+  scheduleRenderWindow();
 }
 
 // Inline rename of a list item (double-click the name)
@@ -338,15 +428,11 @@ async function selectImage(index) {
     el.infoDimensions.textContent = `${el.mainImage.naturalWidth} × ${el.mainImage.naturalHeight} px`;
   };
   
-  // Update active and selected statuses in list
-  document.querySelectorAll('.list-item').forEach((elem, i) => {
-    elem.classList.toggle('active', i === index);
-    elem.classList.toggle('selected', state.selectedPaths.has(state.images[i].path));
-  });
-  
+  // Update active and selected statuses in the rendered window
+  applyRowClasses();
+
   // Scroll into view if needed
-  const activeDot = el.imageList.children[index];
-  if (activeDot) activeDot.scrollIntoView({ block: 'nearest' });
+  scrollIndexIntoView(index);
 }
 
 // Global Keys
