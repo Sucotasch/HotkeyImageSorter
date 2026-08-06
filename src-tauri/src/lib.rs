@@ -1,3 +1,4 @@
+mod backup;
 mod config;
 mod file_ops;
 mod image_proc;
@@ -11,7 +12,7 @@ use tauri::Manager;
 use tauri::State;
 
 /// Maximum number of undo (and redo) batches kept in memory.
-const MAX_HISTORY: usize = 5;
+const MAX_HISTORY: usize = 10;
 
 struct AppState {
     history: Mutex<Vec<Vec<UndoAction>>>,
@@ -230,21 +231,6 @@ async fn get_history_stats(state: State<'_, AppState>) -> Result<(usize, usize),
     Ok((undo_count, redo_count))
 }
 
-fn backup_file(path: &str) -> Result<String, String> {
-    let old_path = std::path::Path::new(path);
-    let tmp = std::env::temp_dir();
-    let ext = old_path.extension().unwrap_or_default();
-    let id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_micros();
-    let backup_path = tmp.join(format!("img_bak_{}.{}", id, ext.to_string_lossy()));
-    // Copy with retries: right after the image was displayed, the webview (or
-    // antivirus) may still hold a transient read lock on the source file.
-    file_ops::copy_with_retry(old_path, &backup_path)?;
-    Ok(backup_path.to_string_lossy().to_string())
-}
-
 /// Swaps the contents of `old_path` (live file) and `new_path` (temp backup).
 /// Used identically by both undo and redo for edit actions.
 ///
@@ -277,7 +263,7 @@ async fn rotate_image(
     degrees: i32,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let backup = backup_file(&path)?;
+    let backup = backup::backup_file(&path)?;
     image_proc::rotate_image(&path, degrees)?;
     push_history(
         &state,
@@ -299,7 +285,7 @@ async fn crop_image(
     height: u32,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let backup = backup_file(&path)?;
+    let backup = backup::backup_file(&path)?;
     image_proc::crop_image(&path, x, y, width, height)?;
     push_history(
         &state,
@@ -355,6 +341,9 @@ async fn hide_window(window: tauri::Window) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            // Remove crash leftovers from previous runs (best effort).
+            backup::cleanup_stale_sessions(std::time::Duration::from_secs(24 * 3600));
+
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
@@ -438,6 +427,8 @@ pub fn run() {
                     cleanup(&state.history.lock().unwrap());
                     cleanup(&state.redo_history.lock().unwrap());
                 }
+                // Drop the whole session dir (undo/redo backups + any leftovers)
+                backup::cleanup_session();
             }
         })
         .run(tauri::generate_context!())
