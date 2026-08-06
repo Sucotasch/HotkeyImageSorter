@@ -174,6 +174,10 @@ fn decode_utf16(body: &[u8]) -> String {
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     let le_str = String::from_utf16(&le_units).unwrap_or_default();
+    // Some writers emit a BOM (U+FEFF) at the start.
+    let strip_bom = |s: String| s.strip_prefix('\u{feff}').map(str::to_string).unwrap_or(s);
+    let be_str = strip_bom(be_str);
+    let le_str = strip_bom(le_str);
 
     let even_nuls = body.iter().step_by(2).filter(|&&b| b == 0).count();
     let odd_nuls = body.iter().skip(1).step_by(2).filter(|&&b| b == 0).count();
@@ -183,8 +187,14 @@ fn decode_utf16(body: &[u8]) -> String {
     if odd_nuls > even_nuls * 2 {
         return le_str;
     }
-    // Ambiguous (non-ASCII text): prefer big-endian per the EXIF spec, unless
-    // it is riddled with control characters.
+    // Ambiguous (non-ASCII text): prefer a meaningful candidate over an empty
+    // one, then big-endian per the EXIF spec unless it is riddled with
+    // control characters.
+    match (be_str.is_empty(), le_str.is_empty()) {
+        (true, false) => return le_str,
+        (false, true) => return be_str,
+        _ => {}
+    }
     let controls = |s: &str| {
         s.chars()
             .filter(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
@@ -375,7 +385,7 @@ fn extract_exif_text_fields(payload: &[u8]) -> Vec<MetadataEntry> {
         _ => return out,
     };
     let ifd0 = read_exif_u32(tiff, 4, le).unwrap_or(0) as usize;
-    walk_exif_ifd(tiff, ifd0, true, le, &mut out);
+    walk_exif_ifd(tiff, ifd0, true, 0, le, &mut out);
     out
 }
 
@@ -401,9 +411,13 @@ fn walk_exif_ifd(
     tiff: &[u8],
     offset: usize,
     follow_next: bool,
+    depth: usize,
     le: bool,
     out: &mut Vec<MetadataEntry>,
 ) {
+    if depth >= 4 {
+        return;
+    }
     let mut off = offset;
     let mut guard = 0;
     while off > 0 && off + 2 <= tiff.len() && guard < 8 {
@@ -431,7 +445,7 @@ fn walk_exif_ifd(
             };
             // Follow the ExifOffset pointer (IFD0 -> Exif sub-IFD).
             if tag == 0x8769 && typ == 4 && cnt == 1 {
-                walk_exif_ifd(tiff, val as usize, false, le, out);
+                walk_exif_ifd(tiff, val as usize, false, depth + 1, le, out);
                 continue;
             }
             let key = match tag {
@@ -578,11 +592,16 @@ fn detect_ai_prompt(
     for key in ["Make", "Model"] {
         if let Some(v) = exif_lookup(key) {
             if let Some(json) = v.trim().strip_prefix("prompt:") {
-                if let Some(mut info) = parse_comfyui_json("prompt", json) {
-                    if let Some(wf) = &workflow_json {
-                        info.params = wf.clone();
+                if let Some(info) = parse_comfyui_json("prompt", json) {
+                    // A degenerate `prompt` graph with no extracted texts is
+                    // not useful — fall through to the workflow payload.
+                    if !info.prompt.is_empty() {
+                        let mut info = info;
+                        if let Some(wf) = &workflow_json {
+                            info.params = wf.clone();
+                        }
+                        return Some(info);
                     }
-                    return Some(info);
                 }
             }
         }
