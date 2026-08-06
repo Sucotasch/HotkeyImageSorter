@@ -521,6 +521,12 @@ async function selectImage(index) {
   // Corner metadata button follows the current image
   updateMetaCorner();
 
+  // Live metadata preview: when the metadata modal is open, refresh it for the
+  // newly focused image instead of requiring open/close on every file.
+  if (!el.modalMetadata.classList.contains('hidden')) {
+    loadMetadata(false);
+  }
+
   // Scroll into view if needed
   scrollIndexIntoView(index);
 }
@@ -982,10 +988,16 @@ function toggleSettings() {
 
 // --- Metadata modal (Ctrl+Q) -------------------------------------------
 
+// Guards against stale responses when navigating quickly while the modal is
+// open: every load bumps the sequence, older in-flight requests are dropped.
+let metadataRequestSeq = 0;
+
 async function toggleMetadataModal() {
   const opening = el.modalMetadata.classList.contains('hidden');
   if (!opening) {
     el.modalMetadata.classList.add('hidden');
+    // Invalidate any in-flight metadata fetch for the now-hidden modal.
+    metadataRequestSeq++;
     return;
   }
   if (!state.currentPath) {
@@ -993,16 +1005,32 @@ async function toggleMetadataModal() {
     return;
   }
   el.modalMetadata.classList.remove('hidden');
-  el.metadataBody.innerHTML = '<div class="metadata-loading">Loading…</div>';
+  await loadMetadata(true);
+}
+
+// Loads and renders metadata for the currently selected image. With
+// `showLoading` (first open) the body is cleared to "Loading…"; on live
+// refreshes (arrow-key navigation) the previous content stays visible until
+// the new data arrives, avoiding a flicker on every keypress.
+async function loadMetadata(showLoading = false) {
+  if (!state.currentPath) return;
+  if (showLoading) {
+    el.metadataBody.innerHTML = '<div class="metadata-loading">Loading…</div>';
+  }
+  const seq = ++metadataRequestSeq;
   try {
     const meta = await invoke('get_metadata', { path: state.currentPath });
+    if (seq !== metadataRequestSeq) return; // stale — a newer navigation won
     renderMetadata(meta);
   } catch (err) {
+    if (seq !== metadataRequestSeq) return;
     el.metadataBody.innerHTML = `<div class="metadata-error">Failed to read metadata: ${escapeHtml(String(err))}</div>`;
   }
 }
 
 function renderMetadata(meta) {
+  const fileName = document.getElementById('metadata-file');
+  if (fileName) fileName.textContent = meta.name;
   const sections = [];
 
   // File summary
