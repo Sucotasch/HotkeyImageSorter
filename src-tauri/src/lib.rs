@@ -306,7 +306,7 @@ async fn get_config() -> AppConfig {
     config::get_config()
 }
 
-/// Returns everything the Ctrl+I metadata modal needs for one image.
+/// Returns everything the Ctrl+Q metadata modal needs for one image.
 #[tauri::command]
 async fn get_metadata(path: String) -> Result<crate::models::ImageMetadata, String> {
     metadata::get_metadata(&path)

@@ -3,7 +3,7 @@
 This file gives Freebuff context about your project: goals, commands, conventions, and gotchas.
 
 ## Quickstart
-- **What it is**: HotkeyImageSorter — a Tauri 2 desktop app (vanilla JS frontend + Rust backend) for keyboard-driven image sorting: preview images, assign target folders to keys A–Z, move/trash with one key, undo/redo, rotate/crop/zoom, metadata viewer (Ctrl+I) with AI-prompt detection. Bilingual README (EN + RU).
+- **What it is**: HotkeyImageSorter — a Tauri 2 desktop app (vanilla JS frontend + Rust backend) for keyboard-driven image sorting: preview images, assign target folders to keys A–Z, move/trash with one key, undo/redo, rotate/crop/zoom, metadata viewer (Ctrl+Q) with AI-prompt detection. Bilingual README (EN + RU).
 - **Setup**: `npm install` (only `@tauri-apps/cli` as devDep; runtime plugins: dialog, single-instance, window-state).
 - **Dev**: `npm run dev` (runs `tauri dev`)
 - **Build**: `npm run build` (runs `tauri build`)
@@ -12,7 +12,7 @@ This file gives Freebuff context about your project: goals, commands, convention
 
 ## Architecture
 - **Frontend (`src/`)**: No bundler. `tauri.conf.json` → `frontendDist: "../src"` serves the folder directly. `index.html` loads only `app.js` as an ES module.
-  - `index.html` — layout: sidebar image list (virtualized), main viewer, right shortcuts panel, settings modal, metadata modal (Ctrl+I)
+  - `index.html` — layout: sidebar image list (virtualized), main viewer, right shortcuts panel, settings modal, metadata modal (Ctrl+Q)
   - `app.js` — ALL app logic: state, virtualized list rendering, keyboard handling, hotkey moves, crop UI, settings, metadata modal, prompt badges
   - `utils.js` — pure helpers (no Tauri): `basename`, `escapeHtml`, `computeResizeRect` (crop), `computeVisibleRange` (virtual list) — unit-tested in `test/`
   - `style.css` — the real styles (dark theme, CSS vars in `:root`)
@@ -48,7 +48,7 @@ This file gives Freebuff context about your project: goals, commands, convention
 - **Sorting**: by `name`/`modified`/`size` with dir saved in config; dates formatted with `ru-RU` locale in `selectImage`.
 - **Windows dev**: needs WebView2 (usually preinstalled) + VS Build Tools (C++ workload). Linux needs webkit2gtk-4.1 dev packages (see README).
 - **Native build gotchas (Windows)**: `src-tauri/vendor/dav1d-sys` is a patched copy of dav1d-sys 0.8.3 (`[patch.crates-io]`). Its `build.rs` finds `vcvars64.bat`, builds dav1d with **MSVC cl** (MinGW-built libdav1d.a won't link), disables tools/tests (windres breaks on paths with spaces). `turbojpeg-sys` needs **cmake + nasm**. Tool binaries: nasm (`D:\c\Tools\nasm\nasm-3.02`), pkg-config-lite (`D:\c\Tools\pkgconfig\pkg-config-lite-0.28-1\bin`), meson+ninja pip (`D:\Works\Python\Scripts`). The repo's bash maps `/c/` to `d:\c\`. CI installs `meson ninja-build nasm pkg-config cmake` on ubuntu.
-- **Key handling**: global `keydown` skips when focus is in an editable element (INPUT/SELECT/TEXTAREA/contenteditable); A–Z keys move current (or multi-selected via Shift/Insert/Ctrl-click) images to configured hotkey folders; Ctrl+I opens metadata; Ctrl+R/C/Z/X are guarded by `anyModalOpen()`.
+- **Key handling**: global `keydown` skips when focus is in an editable element (INPUT/SELECT/TEXTAREA/contenteditable); A–Z keys move current (or multi-selected via Shift/Insert/Ctrl-click) images to configured hotkey folders; Ctrl+Q opens metadata (or the ✦ corner button above the image for files that carry AI metadata); Ctrl+R/C/Z/X are guarded by `anyModalOpen()`.
 - **AI metadata formats understood**: A1111/Forge → PNG tEXt `parameters`; ComfyUI → tEXt `prompt`/`workflow` (JSON) **or** JPEG EXIF `Make`/`Model`/`ImageDescription`/`UserComment` with `Prompt:`/`Workflow:` JSON prefixes (**case-insensitive** — some writers capitalise, e.g. `Prompt:{json}` in Make + `Workflow:{json}` in ImageDescription); **bare ComfyUI graphs** (civitai AIR) stored in EXIF UserComment as UTF-16BE JSON **without** any `prompt:`/`workflow:` prefix (`looks_like_comfyui_graph` heuristic: starts with `{`, contains `class_type` + `inputs`); Qwen-Image workflows store the prompt in `inputs.prompt` (not `inputs.text`) — both keys are collected; InvokeAI → `sd-metadata`; JPEG prompts also in COM or EXIF UserComment/ImageDescription. `check_prompts` scans raw chunk/segment headers (fast, no pixel decode).
 - **EXIF values**: don't use `field.display_value()` for text extraction — it wraps ASCII/UNDEFINED in quotes+escapes. `metadata.rs::field_value_to_string` decodes raw `Value::Ascii`/`Value::Undefined` for Make/Model/UserComment/ImageDescription (strips the 8-byte charset header on UserComment), other tags keep tag-specific display. ComfyUI Make/Model JSON blobs are hidden from the EXIF table and shown in the AI section instead.
 - **kamadak-exif is strict**: it errors `InvalidFormat("Unexpected next IFD")` on real-world files that overlap the "next IFD" pointer with value data (e.g. `Test-Now\JPG\103876708.jpeg`). `metadata.rs` falls back to `extract_exif_text_fields` (a tolerant TIFF walker for Make/Model/ImageDescription/UserComment/Software) in `read_exif` and `parse_exif_bytes`. Don't assume kamadak-exif parses every JPEG.

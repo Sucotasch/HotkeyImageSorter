@@ -1,4 +1,4 @@
-//! Image metadata extraction for the Ctrl+I viewer: EXIF, PNG text chunks
+//! Image metadata extraction for the Ctrl+Q viewer: EXIF, PNG text chunks
 //! (AI prompts/workflows), JPEG comments, and heuristic detection/parsing of
 //! AI-generation metadata (AUTOMATIC1111, ComfyUI, InvokeAI).
 

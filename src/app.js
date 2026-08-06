@@ -41,7 +41,8 @@ const el = {
   hotkeyEditList: document.getElementById('hotkey-edit-list'),
   cropLabel: document.getElementById('crop-label'),
   modalMetadata: document.getElementById('modal-metadata'),
-  metadataBody: document.getElementById('metadata-body')
+  metadataBody: document.getElementById('metadata-body'),
+  metaCorner: document.getElementById('btn-meta-corner')
 };
 
 // True when any modal is open (settings or metadata). Used to suppress global
@@ -94,6 +95,7 @@ function setupEventListeners() {
   document.getElementById('btn-config-hotkeys').addEventListener('click', toggleSettings);
   document.getElementById('btn-close-settings').addEventListener('click', toggleSettings);
   document.getElementById('btn-close-metadata').addEventListener('click', () => toggleMetadataModal());
+  el.metaCorner.addEventListener('click', () => toggleMetadataModal());
   el.btnRotate.addEventListener('click', () => doRotate());
   el.btnCrop.addEventListener('click', () => toggleCrop());
   document.getElementById('btn-undo').addEventListener('click', () => doUndo());
@@ -132,7 +134,7 @@ function setupEventListeners() {
   el.imageList.addEventListener('scroll', () => scheduleRenderWindow(), { passive: true });
 
   // Global hotkeys (arrows, Delete, Enter, Esc, Insert, Home/End, A–Z moves,
-  // Ctrl+I/R/C/Z/X). Note: this must stay registered — a refactor removed it
+  // Ctrl+Q/R/C/Z/X). Note: this must stay registered — a refactor removed it
   // once, silently disabling every keyboard shortcut.
   window.addEventListener('keydown', handleGlobalKeydown);
 
@@ -214,12 +216,16 @@ async function loadFiles(initialLoadPath = null) {
     promptChecked.clear();
     lastListSignature = '';
     sortAndRender(initialLoadPath);
+    // The current image may have disappeared (deleted/moved last file) — hide
+    // the corner button so it never points at a stale selection.
+    updateMetaCorner();
   } catch (err) {
     state.images = [];
     promptPaths.clear();
     promptChecked.clear();
     renderList();
     el.fileCount.textContent = '0 images';
+    updateMetaCorner();
     notify("Cannot load folder: " + err);
   }
 }
@@ -292,6 +298,9 @@ function schedulePromptCheck() {
         const before = promptPaths.size;
         found.forEach(p => promptPaths.add(p));
         unqueried.forEach(p => promptChecked.add(p));
+        // The corner metadata button depends on the same data — refresh it in
+        // case the current image was just checked.
+        updateMetaCorner();
         // Only re-render when something changed (and never while a rename
         // input is live — the rAF path checks this, the async .then must too).
         if (promptPaths.size !== before && renamingIndex === -1) {
@@ -305,6 +314,13 @@ function schedulePromptCheck() {
 // Render the badge glyph for a row, if its path is known to have a prompt.
 function hasPromptBadge(path) {
   return promptPaths.has(path);
+}
+
+// Show/hide the corner metadata button: visible only when the current image
+// carries AI-generation metadata (same lazy data as the list badges).
+function updateMetaCorner() {
+  const show = !!state.currentPath && promptPaths.has(state.currentPath);
+  el.metaCorner.classList.toggle('hidden', !show);
 }
 
 function renderList() {
@@ -358,7 +374,7 @@ function renderWindow() {
       const badge = document.createElement('span');
       badge.className = 'prompt-badge';
       badge.textContent = '✦';
-      badge.title = 'Contains AI generation metadata — press Ctrl+I';
+      badge.title = 'Contains AI generation metadata — press Ctrl+Q';
       div.appendChild(badge);
     }
     container.appendChild(div);
@@ -502,6 +518,9 @@ async function selectImage(index) {
   // Update active and selected statuses in the rendered window
   applyRowClasses();
 
+  // Corner metadata button follows the current image
+  updateMetaCorner();
+
   // Scroll into view if needed
   scrollIndexIntoView(index);
 }
@@ -614,7 +633,7 @@ async function handleGlobalKeydown(e) {
         await loadFiles(successorPath);
       }
     }
-  } else if (e.ctrlKey && (code === 'KeyI' || key === 'i')) {
+  } else if (e.ctrlKey && (code === 'KeyQ' || key === 'q')) {
     e.preventDefault();
     await toggleMetadataModal();
   } else if (e.ctrlKey && (code === 'KeyR' || key === 'r') && !anyModalOpen()) {
@@ -961,7 +980,7 @@ function toggleSettings() {
   }
 }
 
-// --- Metadata modal (Ctrl+I) -------------------------------------------
+// --- Metadata modal (Ctrl+Q) -------------------------------------------
 
 async function toggleMetadataModal() {
   const opening = el.modalMetadata.classList.contains('hidden');

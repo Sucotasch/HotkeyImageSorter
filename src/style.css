@@ -159,6 +159,40 @@ body, html {
   transition: transform 0.1s ease-out;
 }
 
+/* AI-metadata corner button: floats in the top-right of the image panel and
+   opens the metadata modal (Ctrl+Q). Shown only for images that carry AI
+   generation metadata — toggled via `.hidden` from app.js. */
+.meta-corner {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--accent-color);
+  background: rgba(30, 30, 46, 0.85);
+  color: var(--accent-color);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+  backdrop-filter: blur(2px);
+  transition: background 0.15s, color 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+.meta-corner:hover {
+  background: var(--accent-color);
+  color: #fff;
+  transform: scale(1.1);
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.5);
+}
+.meta-corner:active {
+  transform: scale(0.95);
+}
+
 .viewer-footer {
   display: flex;
   align-items: center;
@@ -337,7 +371,7 @@ body, html {
   margin-bottom: 24px;
 }
 
-/* Metadata modal (Ctrl+I) */
+/* Metadata modal (Ctrl+Q) */
 .metadata-content {
   width: 640px;
   max-width: 90vw;

@@ -45,7 +45,7 @@
 | **Image Editing** | Rotate (90°), crop, and zoom capabilities |
 | **Smart Sorting** | Sort by name, date, or size with ascending/descending order |
 | **Persistent Config** | Settings saved between sessions (folders, hotkeys, preferences) |
-| **AI Metadata** | Ctrl+I viewer: EXIF, PNG text chunks (A1111/ComfyUI/InvokeAI prompts & workflows), copy to clipboard |
+| **AI Metadata** | Ctrl+Q viewer: EXIF, PNG text chunks (A1111/ComfyUI/InvokeAI prompts & workflows), copy to clipboard |
 | **Prompt Badges** | Lazy ✦ badge on files that carry AI-generation metadata |
 | **Lossless JPEG** | 90/180/270° rotation without re-encoding (libjpeg-turbo) |
 | **Metadata-safe edits** | Rotate/crop preserve EXIF, ICC, XMP, comments and PNG prompt chunks |
@@ -353,7 +353,7 @@ Moves image to system trash (configurable in settings).
 |----------|--------|
 | `Ctrl+R` | Rotate 90° clockwise (lossless for JPEG) |
 | `Ctrl+C` | Toggle crop mode |
-| `Ctrl+I` | Image metadata viewer (EXIF / AI prompt / copy) |
+| `Ctrl+Q` | Image metadata viewer (EXIF / AI prompt / copy) |
 | `Mouse Wheel` | Zoom in/out |
 | `Ctrl+0` | Reset zoom |
 

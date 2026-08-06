@@ -47,7 +47,7 @@ pub struct AiPromptInfo {
     pub raw: String,
 }
 
-/// Everything the Ctrl+I metadata viewer needs for one image.
+/// Everything the Ctrl+Q metadata viewer needs for one image.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ImageMetadata {
     pub name: String,
