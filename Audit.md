@@ -544,13 +544,13 @@ All fixes below were applied and validated in the follow-up round: `cargo fmt --
 | H4 | ✅ Fixed | `crop_image` clamps coordinates to image bounds (also removed the unused `mut`) |
 | H5 | ✅ Fixed (minimal) | redo capped at `MAX_HISTORY` (5) with backup cleanup; `Destroyed` handler now cleans redo backups too |
 | H6 | ✅ Fixed | `undo_last_move`/`redo_last_move` return `Option<String>` (restored path); `push_history` centralizes cap + redo-invalidation; frontend `doUndo`/`doRedo` select the restored file |
-| H7 | ⚠️ Partially | 5-batch cap kept (user chose the minimal approach); crash-leftover temp cleanup stays a remaining concern |
+| H7 | ✅ Fixed | session-based backups: `%TEMP%/imagesorter_<pid>_<ts>` dir (new `backup.rs`), cap raised to 10, stale-dir cleanup on startup (`cleanup_stale_sessions`), full cleanup on `Destroyed` (`cleanup_session`) — crash leftovers from old runs also removed |
 | M1 | ✅ Corrected | False positive (see note above); added defensive `scale > 0` guard — crop already works at any zoom |
 | M2 | ✅ Fixed | `notify()` toast wired into move/delete/rotate/undo/redo/loadFiles error paths |
 | M3 | ✅ Fixed | `list_files` validates the folder exists; frontend shows a toast on failure |
 | M4 | ✅ Fixed | Extensions: `jpg/jpeg/png/gif/webp/bmp/tif/tiff/avif/ico`; **AVIF now fully supported** (see §14 — decoder via `dav1d` built with MSVC, verified by round-trip tests) |
 | M5 | ✅ Fixed | undo/redo surface rename failures as `Err` instead of silently ignoring them |
-| M6 | ✅ Minimal | `sortAndRender` skips DOM rebuild when the list signature is unchanged |
+| M6 | ✅ Fixed | true windowed virtualization in `app.js`: fixed 32px rows (`ROW_H`), absolute positioning + `.list-spacer` for scroll height, pure `computeVisibleRange` in `utils.js` (6 new tests), `data-index` delegation for click/dblclick, `scrollIndexIntoView` (scrollTop = index×ROW_H). Renders O(visible) instead of O(total) |
 | L1 | ✅ Fixed | `show_menu_on_left_click(false)` |
 | L2 | ✅ Fixed | unused `mut` removed |
 | L3 | ✅ Fixed | `src/main.js`, `src/styles.css`, `src/assets/*` deleted |
@@ -560,6 +560,7 @@ All fixes below were applied and validated in the follow-up round: `cargo fmt --
 | L7 | ✅ Fixed | `tauri-plugin-fs`, `tauri-plugin-opener` removed (Cargo.toml, lib.rs, capabilities) |
 | L8 | ✅ Fixed | unused npm deps removed; `package.json` renamed |
 | L9 | ⏭️ Deferred | version pin style left as-is (cosmetic) |
+| H7 | ✅ Fixed | see row above (session backups, cap 10, startup+quit cleanup) |
 | L10 | ✅ Fixed | `escapeHtml` added to `utils.js` and used in `renderShortcuts`; tests added |
 | L11 | ✅ Fixed | `let _ = window.hide()` |
 | L12 | ✅ Fixed | renamed to **HotkeyImageSorter** (productName, window title, Cargo package, package.json). Bundle identifier reverted to `com.imagesorter.app` — see note below |
@@ -664,6 +665,44 @@ The project path contains spaces (`D:\Arx\Software Downloads\_Images_EDIT-pack\I
 `image_proc.rs` gained 4 round-trip tests that exercise the real encoders/decoders: `avif_roundtrip_rotate` (encode via ravif → decode via dav1d → rotate90 → re-encode → orientation flipped), `avif_roundtrip_crop`, `webp_roundtrip_rotate`, `png_roundtrip_smoke`. **`cargo test` 28/28** ✅, `cargo build` ✅, `npm test` 14/14 ✅, release rebuilt.
 
 `file_ops.rs` already listed `avif` in `SUPPORTED_EXTENSIONS`; README format lists (EN + RU) updated to include AVIF.
+
+## 15. Feature work: metadata preservation, lossless JPEG, metadata viewer, AI-prompt badges
+
+Implemented per `PLAN.md` (all steps committed separately, all validated).
+
+### 15.1 H7 — session-based edit backups ✅
+
+New `src-tauri/src/backup.rs`: backups now live in `%TEMP%/imagesorter_<pid>_<ts>/` (system temp on **C:**; images on **D:/E/F/G** — `swap_edit` already copies cross-volume, so this is fine). Cap raised 5→10. `cleanup_stale_sessions(24h)` runs at startup (removes crash leftovers, incl. old `img_bak_*`), `cleanup_session()` on window `Destroyed`. 3 new tests. Commit `73adf9f`.
+
+### 15.2 M6 — true list virtualization ✅
+
+`src/app.js` now renders only the visible window ± overscan (pure `computeVisibleRange` in `src/utils.js`, 6 new tests): fixed 32px rows absolutely positioned over a `.list-spacer`, events delegated via `data-index`, navigation via `scrollIndexIntoView` (sets `scrollTop`), rename-input protected from re-renders (`renamingIndex` guard). O(visible) per navigation. Commit `7579791`.
+
+### 15.3 Metadata preservation through edits ✅
+
+- `src-tauri/src/jpeg_meta.rs` — raw JPEG segment walker: extracts APPn/COM (EXIF, XMP, ICC, comments) before an edit and splices back missing ones after re-encoding (`merge_missing_segments`, dedup by marker+signature). 4 tests.
+- `src-tauri/src/png_meta.rs` — PNG tEXt/zTXt/iTXt extraction (reads trailing chunks after IDAT, where A1111/ComfyUI write them) and re-injection via `Writer::write_text_chunk` after IDAT (same position AI tools use). Latin-1 chunks keep their type (zTXt stays compressed); non-Latin-1 promoted to iTXt so Unicode prompts survive. Encoding is fully in-memory first, so a failure can never truncate the original. 4 tests.
+- `image_proc.rs` `edit_image` now routes JPEG/PNG through the metadata-preserving paths (other formats unchanged). Commit `d3c37a2`.
+
+### 15.4 Lossless JPEG rotation ✅
+
+`turbojpeg 1.5` (`turbojpeg-sys` vendors libjpeg-turbo; built via cmake — spike passed on this machine in ~49 s). `rotate_image` for JPEGs first tries a true lossless `Transform::op(Rot90/180/270)` with `perfect = true`; non-MCU-aligned images fall back to the metadata-preserving re-encode (never a strip artifact). `copy_none = false` (default) keeps EXIF/ICC/COM markers. 2 new tests (MCU-aligned lossless, imperfect fallback). Commit `2184a85`.
+
+### 15.5 Metadata viewer (Ctrl+I) ✅
+
+- `src-tauri/src/metadata.rs` — `get_metadata` returns file info, EXIF (kamadak-exif), PNG text chunks, JPEG comments, and parsed AI-generation info: A1111 `parameters` (prompt/negative/params), ComfyUI `prompt`/`workflow` JSON (collects CLIP-text node texts), InvokeAI `sd-metadata`. 8 tests.
+- `copy_text` command (arboard) powers the Copy prompt / Copy negative / Copy raw buttons.
+- Frontend: centered modal over the viewer; all values escaped (`escapeHtml`/`escapeAttr`) — no injection vector; `Ctrl+I` free; `anyModalOpen()` guards Delete/Enter/A–Z **and now Ctrl+R/C/Z/X** so no action fires behind an open modal; Escape closes metadata → settings → fullscreen in order. Commit `d837241`.
+
+### 15.6 Lazy AI-prompt badges ✅
+
+`check_prompts` scans only the currently rendered list window (raw PNG chunk walk — no pixel decode; JPEG COM + EXIF UserComment/ImageDescription heuristics). Frontend caches results (`promptPaths` + `promptChecked`, cleared on folder reload), re-renders only when new badges appear, and never during an active rename — no IPC/render loop, no stale reads. ✦ chip in rows with a prompt. 3 new tests. Commit `27bdd44`.
+
+### 15.7 CI / docs ✅
+
+`.github/workflows/ci.yml` now also installs `cmake` (needed by turbojpeg-sys). READMEs and this section updated.
+
+**Verification:** `cargo test` 51/51 ✅, `cargo fmt --check` ✅, `cargo clippy --all-targets` 0 warnings ✅, `node --check` ✅, `npm test` 20/20 ✅.
 
 ## 12. Suggested fix order
 

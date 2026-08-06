@@ -45,6 +45,11 @@
 | **Image Editing** | Rotate (90°), crop, and zoom capabilities |
 | **Smart Sorting** | Sort by name, date, or size with ascending/descending order |
 | **Persistent Config** | Settings saved between sessions (folders, hotkeys, preferences) |
+| **AI Metadata** | Ctrl+I viewer: EXIF, PNG text chunks (A1111/ComfyUI/InvokeAI prompts & workflows), copy to clipboard |
+| **Prompt Badges** | Lazy ✦ badge on files that carry AI-generation metadata |
+| **Lossless JPEG** | 90/180/270° rotation without re-encoding (libjpeg-turbo) |
+| **Metadata-safe edits** | Rotate/crop preserve EXIF, ICC, XMP, comments and PNG prompt chunks |
+| **Virtualized List** | Windowed rendering — smooth on folders with thousands of files |
 
 ### Supported Image Formats
 
@@ -346,8 +351,9 @@ Moves image to system trash (configurable in settings).
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+R` | Rotate 90° clockwise |
+| `Ctrl+R` | Rotate 90° clockwise (lossless for JPEG) |
 | `Ctrl+C` | Toggle crop mode |
+| `Ctrl+I` | Image metadata viewer (EXIF / AI prompt / copy) |
 | `Mouse Wheel` | Zoom in/out |
 | `Ctrl+0` | Reset zoom |
 
@@ -607,6 +613,11 @@ Contributions are welcome! Please read our contributing guidelines before submit
 | **Редактирование изображений** | Поворот (90°), обрезка и масштабирование |
 | **Умная сортировка** | Сортировка по имени, дате или размеру с порядком возрастания/убывания |
 | **Сохранение конфигурации** | Настройки сохраняются между сеансами (папки, горячие клавиши, предпочтения) |
+| **AI-метаданные** | Просмотр Ctrl+I: EXIF, PNG-чанки (промпты/workflow A1111/ComfyUI/InvokeAI), копирование в буфер |
+| **Значки промптов** | Ленивый ✦ у файлов с AI-метаданными генерации |
+| **Lossless JPEG** | Поворот 90/180/270° без перекодирования (libjpeg-turbo) |
+| **Сохранение метаданных** | Поворот/обрезка сохраняют EXIF, ICC, XMP, комментарии и PNG-чанки промптов |
+| **Виртуализированный список** | Оконный рендеринг — плавно на папках с тысячами файлов |
 
 ### Поддерживаемые форматы изображений
 
@@ -909,8 +920,9 @@ Delete
 
 | Горячая клавиша | Действие |
 |-----------------|----------|
-| `Ctrl+R` | Поворот на 90° по часовой стрелке |
+| `Ctrl+R` | Поворот на 90° по часовой стрелке (lossless для JPEG) |
 | `Ctrl+C` | Переключить режим обрезки |
+| `Ctrl+I` | Просмотр метаданных (EXIF / AI-промпт / копирование) |
 | `Колесо мыши` | Масштабирование |
 | `Ctrl+0` | Сброс масштаба |
 
