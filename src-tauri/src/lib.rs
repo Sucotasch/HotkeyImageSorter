@@ -2,7 +2,9 @@ mod backup;
 mod config;
 mod file_ops;
 mod image_proc;
+mod jpeg_meta;
 mod models;
+mod png_meta;
 
 use crate::models::{AppConfig, ImageInfo, UndoAction, UndoActionType};
 use std::sync::Mutex;
