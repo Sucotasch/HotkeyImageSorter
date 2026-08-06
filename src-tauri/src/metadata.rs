@@ -287,8 +287,10 @@ fn has_prompt_fast(path: &str) -> bool {
 }
 
 /// Scans PNG chunk headers for text chunks whose keyword looks like AI
-/// metadata (parameters / prompt / workflow / sd-metadata / metadata). Chunk
-/// types and keywords are visible without inflating IDAT.
+/// metadata (parameters / prompt / workflow / sd-metadata / metadata / XMP).
+/// Chunk types and keywords are visible without inflating IDAT. The XMP
+/// keyword alone is not enough (plain camera XMP exists) — its payload is
+/// checked for generation markers.
 fn find_png_ai_chunk(bytes: &[u8]) -> bool {
     let mut i = 8usize; // skip 8-byte signature
     while i + 8 <= bytes.len() {
@@ -302,6 +304,14 @@ fn find_png_ai_chunk(bytes: &[u8]) -> bool {
                 if let Some(nul) = bytes[data_start..data_end].iter().position(|&b| b == 0) {
                     let keyword = &bytes[data_start..data_start + nul];
                     if is_ai_keyword(keyword) {
+                        return true;
+                    }
+                    // XMP chunks (Draw Things / Krea) carry the prompt inside
+                    // <dc:description> or <exif:UserComment> — only those are
+                    // generation metadata, plain tool XMP is not.
+                    if keyword.eq_ignore_ascii_case(b"XML:com.adobe.xmp")
+                        && xmp_payload_looks_ai(&bytes[data_start..data_end])
+                    {
                         return true;
                     }
                 }
@@ -319,8 +329,32 @@ fn find_png_ai_chunk(bytes: &[u8]) -> bool {
 fn is_ai_keyword(keyword: &[u8]) -> bool {
     matches!(
         keyword,
-        b"parameters" | b"prompt" | b"workflow" | b"sd-metadata" | b"sd_metadata" | b"metadata"
+        b"parameters"
+            | b"prompt"
+            | b"workflow"
+            | b"sd-metadata"
+            | b"sd_metadata"
+            | b"metadata"
+            | b"positive_prompt"
+            | b"negative_prompt"
     )
+}
+
+/// True when an XMP payload contains generation metadata markers:
+/// `<dc:description>` (Draw Things writes the A1111-style prompt there) or
+/// `<exif:UserComment>` (structured JSON). Plain tool XMP (e.g. Photoshop
+/// history) has neither.
+fn xmp_payload_looks_ai(payload: &[u8]) -> bool {
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+    contains(payload, b"dc:description") || contains(payload, b"exif:UserComment")
+}
+
+/// True when an XMP text value (decoded) contains `<dc:description>` or
+/// `<exif:UserComment>`.
+fn xmp_text_looks_ai(value: &str) -> bool {
+    value.contains("dc:description") || value.contains("exif:UserComment")
 }
 
 /// Scans JPEG segments for AI prompt markers. Looks inside COM segments for
@@ -520,6 +554,107 @@ fn walk_exif_ifd(
     }
 }
 
+/// Parses an XMP metadata blob (PNG `XML:com.adobe.xmp` iTXt chunk) for AI
+/// generation info. Draw Things / Krea write two relevant fields:
+/// - `<dc:description>` — an A1111-style text (prompt + `Steps: …` line),
+///   which `parse_a1111_parameters` can handle directly;
+/// - `<exif:UserComment>` — JSON with `c` (prompt), `uc` (negative prompt),
+///   `steps`, `sampler`, `seed`, `model`, … (Draw Things' own format).
+///
+/// The XMP namespace/creator (`xmp:CreatorTool`) is used as the source.
+fn parse_xmp_prompt(xmp: &str) -> Option<AiPromptInfo> {
+    let source = extract_xmp_tag(xmp, "xmp:CreatorTool").unwrap_or_else(|| "XMP".to_string());
+
+    // 1) dc:description — plain A1111-style payload
+    if let Some(desc) = extract_xmp_field(xmp, "dc:description") {
+        let desc = desc.trim();
+        if !desc.is_empty() {
+            if looks_like_a1111(desc) {
+                if let Some(mut info) = parse_a1111_parameters(desc) {
+                    info.source = source;
+                    return Some(info);
+                }
+            }
+            return Some(AiPromptInfo {
+                source: source.clone(),
+                prompt: desc.to_string(),
+                negative_prompt: None,
+                params: String::new(),
+                raw: desc.to_string(),
+            });
+        }
+    }
+
+    // 2) exif:UserComment — structured JSON
+    let uc = extract_xmp_field(xmp, "exif:UserComment")?;
+    let v: serde_json::Value = serde_json::from_str(&uc).ok()?;
+    let obj = v.as_object()?;
+    let prompt = obj.get("c").and_then(|c| c.as_str()).unwrap_or("");
+    if prompt.trim().is_empty() {
+        return None;
+    }
+    let negative = obj.get("uc").and_then(|u| u.as_str()).map(str::to_string);
+    // Remaining keys (steps, sampler, seed, model, …) become the parameters.
+    let params: Vec<String> = obj
+        .iter()
+        .filter(|(k, _)| *k != "c" && *k != "uc")
+        .map(|(k, v)| format!("{k}: {}", json_value_to_string(v)))
+        .collect();
+    Some(AiPromptInfo {
+        source,
+        prompt: prompt.to_string(),
+        negative_prompt: negative,
+        params: params.join("\n"),
+        raw: uc,
+    })
+}
+
+/// Renders a JSON value compactly for the parameters block.
+fn json_value_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Extracts the plain text of the first `<rdf:li>` inside the named XMP
+/// field (e.g. `<dc:description>` or `<exif:UserComment>`). XML entities
+/// (`&#xA;`, `&amp;`, …) are unescaped.
+fn extract_xmp_field(xmp: &str, field: &str) -> Option<String> {
+    let open = format!("<{field}>");
+    let start = xmp.find(&open)? + open.len();
+    let end = xmp[start..].find(&format!("</{field}>"))? + start;
+    let block = &xmp[start..end];
+    let li = block.find("<rdf:li")?;
+    let gt = block[li..].find('>')? + li + 1;
+    let close = block[gt..].find("</rdf:li>")? + gt;
+    Some(xml_unescape(&block[gt..close]))
+}
+
+/// Extracts the content of a simple XML tag like
+/// `<xmp:CreatorTool>Draw Things</xmp:CreatorTool>`.
+fn extract_xmp_tag(xmp: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let start = xmp.find(&open)? + open.len();
+    let end = xmp[start..].find(&format!("</{tag}>"))? + start;
+    Some(xml_unescape(&xmp[start..end]))
+}
+
+/// Decodes the XML entities Draw Things uses (`&#xA;` newlines, `&amp;`,
+/// `&quot;`, `&lt;`, `&gt;`, `&apos;`).
+fn xml_unescape(s: &str) -> String {
+    s.replace("&#xA;", "\n")
+        .replace("&#xD;", "\r")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
 /// Detect and parse AI-generation prompts stored in the image.
 fn detect_ai_prompt(
     exif: &[MetadataEntry],
@@ -528,17 +663,31 @@ fn detect_ai_prompt(
 ) -> Option<AiPromptInfo> {
     // PNG: A1111/Forge store the full generation info in the `parameters`
     // chunk; ComfyUI stores `prompt` (the executed graph) and `workflow`
-    // (the full UI graph) as JSON; InvokeAI uses `sd-metadata`.
+    // (the full UI graph) as JSON; InvokeAI uses `sd-metadata`; Draw Things /
+    // Krea write an `XML:com.adobe.xmp` chunk; some generators split the
+    // prompt into `positive_prompt` / `negative_prompt`.
+    // A1111 `parameters` first: it is the most complete source (prompt +
+    // negative + settings in one string). Some ComfyUI graphs also carry a
+    // `parameters` chunk — prefer it over the graph.
+    for c in text_chunks {
+        if c.keyword == "parameters" {
+            if let Some(info) = parse_a1111_parameters(&c.text) {
+                return Some(info);
+            }
+        }
+    }
+    let mut positive_split: Option<String> = None;
+    let mut negative_split: Option<String> = None;
     for c in text_chunks {
         match c.keyword.as_str() {
-            "parameters" => {
-                if let Some(info) = parse_a1111_parameters(&c.text) {
-                    return Some(info);
-                }
-            }
+            "parameters" => {} // already handled above
             "prompt" | "workflow" => {
                 if let Some(info) = parse_comfyui_json(&c.keyword, &c.text) {
-                    return Some(info);
+                    // A graph with no extractable text (e.g. a bare UI-workflow
+                    // shell) is not useful — keep looking.
+                    if !info.prompt.is_empty() {
+                        return Some(info);
+                    }
                 }
             }
             "sd-metadata" | "sd_metadata" => {
@@ -550,8 +699,28 @@ fn detect_ai_prompt(
                     raw: c.text.clone(),
                 });
             }
-            _ => {}
+            "positive_prompt" => positive_split = Some(c.text.clone()),
+            "negative_prompt" => negative_split = Some(c.text.clone()),
+            _ => {
+                // XMP: the chunk keyword is the XMP namespace
+                // (`XML:com.adobe.xmp`); only chunks that carry generation
+                // markers are worth parsing.
+                if xmp_text_looks_ai(&c.text) {
+                    if let Some(info) = parse_xmp_prompt(&c.text) {
+                        return Some(info);
+                    }
+                }
+            }
         }
+    }
+    if let Some(prompt) = positive_split {
+        return Some(AiPromptInfo {
+            source: "Stable Diffusion".to_string(),
+            prompt: prompt.clone(),
+            negative_prompt: negative_split,
+            params: String::new(),
+            raw: prompt,
+        });
     }
 
     // JPEG: A1111-era web UIs often put the prompt in a COM segment; some
@@ -746,17 +915,71 @@ fn looks_like_param_line(trimmed: &str) -> bool {
         || trimmed.starts_with("Version:")
 }
 
-/// Reads the prompt text from a ComfyUI text-encoding node. The input key
-/// depends on the model family:
+/// Reads the prompt text reachable from a ComfyUI text-encoding node. The
+/// input key depends on the node family:
 /// - `CLIPTextEncode` / `CLIPTextEncodeFlux` / `smZ CLIPTextEncode` → `inputs.text`
 /// - Qwen-Image nodes (`TextEncodeQwenImage*`) → `inputs.prompt`
-fn comfyui_node_text(node: &serde_json::Value) -> Option<String> {
+/// - Prompt-UI nodes (`ZML_PromptUINode`) → `inputs.positive_prompt`/`negative_prompt`
+///
+/// Many graphs *chain* text nodes (e.g. Krea: `TextEncodeKrea2.prompt` →
+/// `PixaromaPauseText.text` → `CR Text Replace.text` → `TextGenerate.prompt`;
+/// or `CLIPTextEncode.text → ["13", 0]` → `ZML_PromptUINode`), so a value that
+/// is itself a link (`["node_id", output]`) is followed transitively. A
+/// visited set guards against cycles.
+fn comfyui_node_text(
+    node: &serde_json::Value,
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    comfyui_node_text_inner(node, obj, &mut Vec::new())
+}
+
+fn comfyui_node_text_inner(
+    node: &serde_json::Value,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    visited: &mut Vec<String>,
+) -> Option<String> {
     let inputs = node.get("inputs").and_then(|i| i.as_object())?;
-    for key in ["text", "prompt"] {
-        if let Some(t) = inputs.get(key).and_then(|t| t.as_str()) {
-            let t = t.trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
+    // 0) `PrimitiveString`-family nodes (PrimitiveStringMultiline, …) hold the
+    //    text in a `value` input — a key not shared by model/lora loaders.
+    let class_type = node
+        .get("class_type")
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    if class_type.contains("PrimitiveString") {
+        if let Some(serde_json::Value::String(s)) = inputs.get("value") {
+            let s = s.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    // 1) Only *text* keys carry the prompt — never model/lora/unet names, so
+    //    walking a LoraLoader node cannot yield "model.safetensors".
+    for key in ["text", "prompt", "positive_prompt", "negative_prompt"] {
+        if let Some(serde_json::Value::String(s)) = inputs.get(key) {
+            let s = s.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    // 2) Follow any input that is a link (`["node_id", out]`) — the prompt
+    //    chains through `conditioning` ports and `Switch` nodes in Krea/Krea-
+    //    style graphs.
+    for v in inputs.values() {
+        let serde_json::Value::Array(arr) = v else {
+            continue;
+        };
+        let Some(id) = arr.first().and_then(|x| x.as_str()) else {
+            continue;
+        };
+        if visited.iter().any(|v| v == id) {
+            continue;
+        }
+        visited.push(id.to_string());
+        if let Some(next) = obj.get(id) {
+            if let Some(t) = comfyui_node_text_inner(next, obj, visited) {
+                return Some(t);
             }
         }
     }
@@ -764,13 +987,13 @@ fn comfyui_node_text(node: &serde_json::Value) -> Option<String> {
 }
 
 /// Resolves a ComfyUI link value (`["node_id", output]`) to the referenced
-/// node's prompt text.
+/// node's prompt text (following any further text links).
 fn comfyui_link_text(
     link: &serde_json::Value,
     obj: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<String> {
     let id = link.as_array()?.first()?.as_str()?;
-    comfyui_node_text(obj.get(id)?)
+    comfyui_node_text(obj.get(id)?, obj)
 }
 
 /// Parses a ComfyUI `prompt`/`workflow` JSON and extracts the prompt texts.
@@ -780,11 +1003,60 @@ fn comfyui_link_text(
 /// reference the text-encoding nodes — those are split into the prompt and
 /// negative prompt respectively. Without a sampler link (e.g. a workflow UI
 /// graph), every text-encoding node is collected into the prompt block.
+/// Rewrites bare `NaN` / `Infinity` / `-Infinity` JSON tokens (which some
+/// generators, e.g. Krea, emit for `is_changed`) to `null` so the strict
+/// serde_json parser accepts the graph. Strings are left untouched.
+fn sanitize_json_float_tokens(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    let mut i = 0;
+    let mut in_string = false;
+    while i < json.len() {
+        let ch = json[i..].chars().next().unwrap();
+        if in_string {
+            out.push(ch);
+            i += ch.len_utf8();
+            if ch == '\\' {
+                if let Some(c2) = json[i..].chars().next() {
+                    out.push(c2);
+                    i += c2.len_utf8();
+                }
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                out.push('"');
+                i += 1;
+            }
+            'N' if json[i..].starts_with("NaN") => {
+                out.push_str("null");
+                i += 3;
+            }
+            'I' if json[i..].starts_with("Infinity") => {
+                out.push_str("null");
+                i += 8;
+            }
+            '-' if json[i..].starts_with("-Infinity") => {
+                out.push_str("null");
+                i += 9;
+            }
+            _ => {
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
 fn parse_comfyui_json(keyword: &str, json: &str) -> Option<AiPromptInfo> {
     if !json.trim_start().starts_with('{') {
         return None;
     }
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&sanitize_json_float_tokens(json)).ok()?;
     let obj = v.as_object()?;
 
     // Executed-prompt graphs: follow the sampler's positive/negative links.
@@ -812,10 +1084,20 @@ fn parse_comfyui_json(keyword: &str, json: &str) -> Option<AiPromptInfo> {
                 .and_then(|l| comfyui_link_text(l, obj));
         }
     }
-    if positive.is_some() || negative.is_some() {
+    // Only take the sampler path when the *positive* text resolved — a
+    // resolved negative with an unresolvable positive would produce an empty
+    // prompt; fall back to collecting all text nodes instead.
+    if let Some(pos_text) = positive {
+        // Krea graphs zero out the negative with a `ConditioningZeroOut`
+        // wired to the *same* CLIPTextEncode chain as the positive, so both
+        // resolve to the identical string. Semantically that is an empty
+        // negative — drop it rather than show the prompt twice.
+        if negative.as_deref() == Some(pos_text.as_str()) {
+            negative = None;
+        }
         return Some(AiPromptInfo {
             source: "ComfyUI".to_string(),
-            prompt: positive.unwrap_or_default(),
+            prompt: pos_text,
             negative_prompt: negative,
             params: if keyword == "workflow" {
                 json.to_string()
@@ -827,7 +1109,35 @@ fn parse_comfyui_json(keyword: &str, json: &str) -> Option<AiPromptInfo> {
     }
 
     // No sampler link: collect every text-encoding node.
-    let prompts: Vec<String> = obj.values().filter_map(comfyui_node_text).collect();
+    let mut prompts: Vec<String> = obj
+        .values()
+        .filter_map(|n| comfyui_node_text(n, obj))
+        .collect();
+    // UI *workflow* graphs are shaped `{"id":…, "nodes":[…]}`: the executed
+    // `inputs` aren't present, but each node in the array carries its widget
+    // values — the prompt lives in `widgets_values[0]` of text/prompt-
+    // encoding nodes.
+    if prompts.is_empty() {
+        if let Some(nodes) = obj.get("nodes").and_then(|n| n.as_array()) {
+            for node in nodes {
+                let ty = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if !ty.contains("Text") && !ty.contains("Prompt") && !ty.contains("Encode") {
+                    continue;
+                }
+                if let Some(wv) = node.get("widgets_values").and_then(|w| w.as_array()) {
+                    for v in wv {
+                        if let Some(s) = v.as_str() {
+                            let s = s.trim();
+                            if !s.is_empty() {
+                                prompts.push(s.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     Some(AiPromptInfo {
         source: "ComfyUI".to_string(),
         prompt: prompts.join("\n\n"),
@@ -1415,6 +1725,172 @@ mod tests {
         let info = parse_comfyui_json("prompt", json).unwrap();
         assert_eq!(info.prompt, "a red car\n\nblurry");
         assert_eq!(info.negative_prompt, None);
+    }
+
+    #[test]
+    fn parses_draw_things_xmp_description() {
+        // Draw Things writes an A1111-style prompt into <dc:description> and
+        // a structured JSON into <exif:UserComment>.
+        let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:exif="http://ns.adobe.com/exif/1.0/"><dc:description><rdf:Alt><rdf:li xml:lang="x-default">a red car&#xA;&#xA;on a highway&#xA;Steps: 12, Sampler: Euler A Trailing, Seed: 2573478191, Size: 1024x1280, Model: krea_2_raw_q8p.ckpt</rdf:li></rdf:Alt></dc:description><xmp:CreatorTool>Draw Things</xmp:CreatorTool><exif:UserComment><rdf:Alt><rdf:li xml:lang="x-default">{"c":"a red car","steps":12,"sampler":"Euler A Trailing","seed":2573478191,"model":"krea_2_raw_q8p.ckpt"}</rdf:li></rdf:Alt></exif:UserComment></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        assert!(xmp_text_looks_ai(xmp));
+
+        // dc:description path → parsed as A1111 (Steps:/Sampler:/Seed:)
+        let info = parse_xmp_prompt(xmp).unwrap();
+        assert_eq!(info.source, "Draw Things");
+        assert!(info.prompt.contains("a red car"));
+        assert!(info.prompt.contains("on a highway"));
+        assert!(info.params.contains("Steps: 12"));
+        assert!(info.params.contains("Seed: 2573478191"));
+    }
+
+    #[test]
+    fn parses_draw_things_xmp_usercomment_json() {
+        // No dc:description → falls back to exif:UserComment JSON
+        let xmp = r#"<x:xmpmeta><rdf:RDF><rdf:Description xmlns:exif="http://ns.adobe.com/exif/1.0/" xmlns:xmp="http://ns.adobe.com/xap/1.0/"><xmp:CreatorTool>Draw Things</xmp:CreatorTool><exif:UserComment><rdf:Alt><rdf:li xml:lang="x-default">{"c":"a cat","uc":"blurry","steps":8,"sampler":"Euler","seed":42,"model":"waifast_f16.ckpt"}</rdf:li></rdf:Alt></exif:UserComment></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        let info = parse_xmp_prompt(xmp).unwrap();
+        assert_eq!(info.source, "Draw Things");
+        assert_eq!(info.prompt, "a cat");
+        assert_eq!(info.negative_prompt.as_deref(), Some("blurry"));
+        assert!(info.params.contains("steps: 8"));
+        assert!(info.params.contains("seed: 42"));
+    }
+
+    #[test]
+    fn plain_tool_xmp_is_not_ai() {
+        // Photoshop history XMP has neither dc:description nor exif:UserComment
+        let xmp = r#"<x:xmpmeta><rdf:RDF><rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/"><xmp:CreatorTool>Adobe Photoshop</xmp:CreatorTool><xmpMM:History><rdf:Seq><rdf:li stEvt:action="created"/></rdf:Seq></xmpMM:History></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        assert!(!xmp_text_looks_ai(xmp));
+        assert!(parse_xmp_prompt(xmp).is_none());
+    }
+
+    #[test]
+    fn detects_positive_negative_prompt_chunks() {
+        let exif = vec![];
+        let chunks = vec![
+            png_meta::PngTextChunk {
+                kind: png_meta::PngTextKind::Text,
+                keyword: "positive_prompt".to_string(),
+                text: "(cameltoe:1.1), milf, large breasts".to_string(),
+            },
+            png_meta::PngTextChunk {
+                kind: png_meta::PngTextKind::Text,
+                keyword: "negative_prompt".to_string(),
+                text: "blurry, low quality".to_string(),
+            },
+        ];
+        let info = detect_ai_prompt(&exif, &chunks, &[]).unwrap();
+        assert!(info.prompt.contains("cameltoe"));
+        assert_eq!(info.negative_prompt.as_deref(), Some("blurry, low quality"));
+    }
+
+    #[test]
+    fn png_badge_detects_xmp_and_positive_prompt() {
+        // XMP chunk in a real PNG
+        let xmp_text = r#"<x:xmpmeta><rdf:RDF><rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:description><rdf:Alt><rdf:li xml:lang="x-default">a cat&#xA;Steps: 8</rdf:li></rdf:Alt></dc:description></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xmp.png");
+        std::fs::write(&path, {
+            let mut bytes = Vec::new();
+            {
+                let w = &mut std::io::Cursor::new(&mut bytes);
+                let mut enc = png::Encoder::new(w, 2, 2);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                let mut writer = enc.write_header().unwrap();
+                writer.write_image_data(&[0u8; 16]).unwrap();
+                writer
+                    .write_text_chunk(&png::text_metadata::ITXtChunk::new(
+                        "XML:com.adobe.xmp".to_string(),
+                        xmp_text.to_string(),
+                    ))
+                    .unwrap();
+                writer.finish().unwrap();
+            }
+            bytes
+        })
+        .unwrap();
+        assert!(find_png_ai_chunk(&std::fs::read(&path).unwrap()));
+
+        // positive_prompt keyword alone triggers the badge
+        let path2 = dir.path().join("pos.png");
+        std::fs::write(&path2, {
+            let mut bytes = Vec::new();
+            {
+                let w = &mut std::io::Cursor::new(&mut bytes);
+                let mut enc = png::Encoder::new(w, 2, 2);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                let mut writer = enc.write_header().unwrap();
+                writer.write_image_data(&[0u8; 16]).unwrap();
+                writer
+                    .write_text_chunk(&png::text_metadata::TEXtChunk::new(
+                        "positive_prompt".to_string(),
+                        "a cat".to_string(),
+                    ))
+                    .unwrap();
+                writer.finish().unwrap();
+            }
+            bytes
+        })
+        .unwrap();
+        assert!(find_png_ai_chunk(&std::fs::read(&path2).unwrap()));
+    }
+
+    #[test]
+    fn comfyui_primitive_string_links_resolved() {
+        // Krea-style graphs: CLIPTextEncode.text → Any Switch →
+        // PrimitiveStringMultiline (which stores the text in `value`, not
+        // `text`). The sampler links must still resolve through the chain.
+        let json = r#"{"78:75":{"class_type":"KSampler","inputs":{"positive":["16",0],"negative":["78:73",0]}},"16":{"class_type":"ConditioningKrea2Rebalance","inputs":{"conditioning":["63",0]}},"63":{"class_type":"RBG_Smart_Seed_Variance","inputs":{"conditioning":["78:15",0]}},"78:15":{"class_type":"CLIPTextEncode","inputs":{"text":["78:72",0]}},"78:72":{"class_type":"Any Switch (rgthree)","inputs":{"any_02":["143",0]}},"143":{"class_type":"PrimitiveStringMultiline","inputs":{"value":"a high-resolution photograph of a cat"}},"78:73":{"class_type":"ConditioningZeroOut","inputs":{"conditioning":["78:15",0]}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert_eq!(info.source, "ComfyUI");
+        assert!(info
+            .prompt
+            .contains("a high-resolution photograph of a cat"));
+    }
+
+    #[test]
+    fn comfyui_switch_branch_resolved() {
+        // Krea2T: KSampler → CLIPTextEncode → ComfySwitchNode whose branches
+        // are links — only the on_true branch leads to a text node. The
+        // resolver must walk every branch until it finds the text.
+        let json = r#"{"30:53":{"class_type":"ClownsharKSampler_Beta","inputs":{"positive":["30:6",0],"negative":["30:13",0]}},"30:6":{"class_type":"CLIPTextEncode","inputs":{"text":["30:28",0]}},"30:28":{"class_type":"ComfySwitchNode","inputs":{"switch":["30:23",0],"on_false":["30:24",0],"on_true":["30:27",0]}},"30:23":{"class_type":"PrimitiveBoolean","inputs":{"value":true}},"30:24":{"class_type":"PrimitiveBoolean","inputs":{"value":false}},"30:27":{"class_type":"PrimitiveStringMultiline","inputs":{"value":"a beautiful young woman on a bed"}},"30:13":{"class_type":"ConditioningZeroOut","inputs":{"conditioning":["30:6",0]}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        // Only the on_true branch of the switch leads to a text node
+        assert!(info.prompt.contains("a beautiful young woman on a bed"));
+    }
+
+    #[test]
+    fn comfyui_zeroed_negative_not_duplicated() {
+        // Krea: KSampler.negative → ConditioningZeroOut → same CLIPTextEncode
+        // chain as the positive. The resolved negative equals the prompt, so
+        // it must be dropped (semantically an empty negative).
+        let json = r#"{"78:75":{"class_type":"KSampler","inputs":{"positive":["78:15",0],"negative":["78:73",0]}},"78:73":{"class_type":"ConditioningZeroOut","inputs":{"conditioning":["78:15",0]}},"78:15":{"class_type":"CLIPTextEncode","inputs":{"text":"a red car on a highway"}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert_eq!(info.prompt, "a red car on a highway");
+        assert_eq!(info.negative_prompt, None);
+    }
+
+    #[test]
+    fn sanitize_removes_bare_nan_and_infinity() {
+        // Krea graphs emit `is_changed: NaN` / `Infinity` — legal in Python,
+        // rejected by serde_json. The sanitizer rewrites them to null while
+        // leaving string contents (e.g. "NaN" inside a prompt) untouched.
+        let json = r#"{"1":{"class_type":"KSampler","inputs":{"cfg":7.0,"seed":NaN,"is_changed":Infinity,"other":-Infinity,"text":"keep NaN here"}},"2":{"class_type":"CLIPTextEncode","inputs":{"text":"a cat"}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert!(info.prompt.contains("a cat"));
+        assert!(info.raw.contains("keep NaN here"));
+    }
+
+    #[test]
+    fn comfyui_ui_workflow_widgets_values_collected() {
+        // A UI workflow graph is shaped `{"id":…,"nodes":[…]}` — the prompt
+        // text lives in `widgets_values[0]` of the text-encoding nodes.
+        let json = r#"{"id":"abc","revision":0,"last_node_id":13,"nodes":[{"id":13,"type":"ZML_PromptUINode","widgets_values":["(masterpiece, best quality)"]},{"id":12,"type":"KSampler","widgets_values":[42,"euler"]},{"id":11,"type":"CLIPTextEncode","widgets_values":["a red car","anything"]}]}"#;
+        let info = parse_comfyui_json("workflow", json).unwrap();
+        assert!(info.prompt.contains("(masterpiece, best quality)"));
+        assert!(info.prompt.contains("a red car"));
+        assert!(info.params.contains("\"nodes\""));
     }
 
     #[test]
