@@ -203,9 +203,16 @@ async function selectFolder() {
 async function loadFiles(initialLoadPath = null) {
   try {
     state.images = await invoke('list_files', { dir: state.folder });
+    // The folder changed (or files were moved/edited): prompt badges from the
+    // previous listing are stale, so rebuild the cache from scratch.
+    promptPaths.clear();
+    promptChecked.clear();
+    lastListSignature = '';
     sortAndRender(initialLoadPath);
   } catch (err) {
     state.images = [];
+    promptPaths.clear();
+    promptChecked.clear();
     renderList();
     el.fileCount.textContent = '0 images';
     notify("Cannot load folder: " + err);
@@ -259,6 +266,46 @@ const OVERSCAN = 20;
 let listStart = 0;
 let listEnd = 0;
 
+// Lazy "has AI prompt" badges. `promptPaths` is a Set of file paths known to
+// carry generation metadata; `promptChecked` remembers every path already
+// queried (positive or negative) so scrolling never re-reads the same files.
+// Both are populated only for the rendered window (±overscan) via
+// check_prompts, so scanning stays O(visible) instead of O(folder).
+const promptPaths = new Set();
+const promptChecked = new Set();
+let promptCheckPending = null;
+
+// Request badge info for the not-yet-checked paths in the rendered window.
+function schedulePromptCheck() {
+  if (promptCheckPending) return;
+  promptCheckPending = requestAnimationFrame(() => {
+    promptCheckPending = null;
+    // Don't scan while an inline-rename input is active
+    if (renamingIndex !== -1) return;
+    const { start, end } = computeListRange();
+    const slice = state.images.slice(Math.max(0, start), Math.min(state.images.length, end));
+    const unqueried = slice.map(i => i.path).filter(p => !promptChecked.has(p));
+    if (!unqueried.length) return;
+    invoke('check_prompts', { paths: unqueried })
+      .then(found => {
+        const before = promptPaths.size;
+        found.forEach(p => promptPaths.add(p));
+        unqueried.forEach(p => promptChecked.add(p));
+        // Only re-render when something changed (and never while a rename
+        // input is live — the rAF path checks this, the async .then must too).
+        if (promptPaths.size !== before && renamingIndex === -1) {
+          renderWindow();
+        }
+      })
+      .catch(() => {});
+  });
+}
+
+// Render the badge glyph for a row, if its path is known to have a prompt.
+function hasPromptBadge(path) {
+  return promptPaths.has(path);
+}
+
 function renderList() {
   const container = el.imageList;
   // Preserve scroll across rebuilds (e.g. rename cancel) where reasonable;
@@ -300,10 +347,23 @@ function renderWindow() {
     div.dataset.index = String(i);
     div.style.top = (i * ROW_H) + 'px';
     div.title = img.name;
-    div.textContent = img.name;
+    // Name text
+    const name = document.createElement('span');
+    name.className = 'list-item-name';
+    name.textContent = img.name;
+    div.appendChild(name);
+    // AI prompt badge (lazy — filled in by schedulePromptCheck)
+    if (hasPromptBadge(img.path)) {
+      const badge = document.createElement('span');
+      badge.className = 'prompt-badge';
+      badge.textContent = '✦';
+      badge.title = 'Contains AI generation metadata — press Ctrl+I';
+      div.appendChild(badge);
+    }
     container.appendChild(div);
   }
   applyRowClasses();
+  schedulePromptCheck();
 }
 
 // Refresh active/selected classes for the currently rendered window.

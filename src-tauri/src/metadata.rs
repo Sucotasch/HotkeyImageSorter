@@ -103,6 +103,156 @@ fn read_jpeg_comments(path: &str) -> Vec<String> {
         .collect()
 }
 
+/// Checks a batch of image paths for the *presence* of an AI-generation
+/// prompt, returning only the paths that have one. Lightweight by design: it
+/// reads only the metadata (PNG text chunks / JPEG segments), never decodes
+/// pixels, and skips files whose extension cannot carry AI metadata. The
+/// frontend calls this for the visible list window and caches the results.
+pub fn check_prompts(paths: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for path in paths {
+        if has_prompt_fast(path) {
+            out.push(path.clone());
+        }
+    }
+    out
+}
+
+/// Extension-only gate before touching the file: only PNG and JPEG can carry
+/// the AI metadata formats we understand (tEXt/zTXt/iTXt chunks, EXIF
+/// UserComment/ImageDescription, COM segments).
+fn can_carry_prompt(path: &str) -> bool {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg")
+}
+
+/// Cheap presence check: returns true when the file has AI metadata. Doesn't
+/// fully decode anything, so it stays fast on huge batches.
+fn has_prompt_fast(path: &str) -> bool {
+    if !can_carry_prompt(path) {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext == "png" {
+        // PNG: scan raw chunk types only (tEXt/zTXt/iTXt with known keywords).
+        // Walk the chunk stream cheaply instead of the full png decode.
+        find_png_ai_chunk(&bytes)
+    } else {
+        // JPEG: look for known prompt markers in COM segments and EXIF fields.
+        find_jpeg_prompt_marker(&bytes)
+    }
+}
+
+/// Scans PNG chunk headers for text chunks whose keyword looks like AI
+/// metadata (parameters / prompt / workflow / sd-metadata / metadata). Chunk
+/// types and keywords are visible without inflating IDAT.
+fn find_png_ai_chunk(bytes: &[u8]) -> bool {
+    let mut i = 8usize; // skip 8-byte signature
+    while i + 8 <= bytes.len() {
+        let len = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
+        let ctype = &bytes[i + 4..i + 8];
+        match ctype {
+            b"tEXt" | b"zTXt" | b"iTXt" => {
+                // keyword runs up to the NUL separator
+                let data_start = i + 8;
+                let data_end = data_start.saturating_add(len).min(bytes.len());
+                if let Some(nul) = bytes[data_start..data_end].iter().position(|&b| b == 0) {
+                    let keyword = &bytes[data_start..data_start + nul];
+                    if is_ai_keyword(keyword) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i = i + 12 + len; // 8 header + 4 CRC
+        if i > bytes.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn is_ai_keyword(keyword: &[u8]) -> bool {
+    matches!(
+        keyword,
+        b"parameters" | b"prompt" | b"workflow" | b"sd-metadata" | b"sd_metadata" | b"metadata"
+    )
+}
+
+/// Scans JPEG segments for AI prompt markers. Looks inside COM segments for
+/// A1111 parameter text, and inside APP1 EXIF for UserComment/ImageDescription
+/// containing such markers.
+fn find_jpeg_prompt_marker(bytes: &[u8]) -> bool {
+    let segments = jpeg_meta::extract_segments(bytes);
+    let mut com_hit = false;
+    for seg in &segments {
+        if seg.marker == 0xFE {
+            // COM segment
+            let text = String::from_utf8_lossy(&seg.data);
+            if looks_like_a1111(&text) {
+                com_hit = true;
+                break;
+            }
+        }
+    }
+    if com_hit {
+        return true;
+    }
+    // EXIF: some tools store the prompt in UserComment or ImageDescription
+    // rather than a COM segment. Parse only the APP1 EXIF blob via kamadak-exif.
+    for seg in &segments {
+        if seg.marker == 0xE1 && seg.data.starts_with(b"Exif\0\0") {
+            if let Some(exif) = parse_exif_bytes(&seg.data) {
+                for field in exif {
+                    if matches!(
+                        field.key.to_ascii_lowercase().as_str(),
+                        "usercomment" | "imagedescription"
+                    ) && looks_like_a1111(&field.value)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Parses a raw APP1 EXIF payload (including the "Exif\0\0" header) into
+/// key/value pairs, or returns None when it cannot be parsed. The 6-byte
+/// header is stripped so the remainder is a bare TIFF structure that
+/// `read_from_container` can recognise.
+fn parse_exif_bytes(data: &[u8]) -> Option<Vec<MetadataEntry>> {
+    use std::io::Cursor;
+    let tiff = data.strip_prefix(b"Exif\0\0").unwrap_or(data);
+    let mut cursor = Cursor::new(tiff);
+    let exif = exif::Reader::new().read_from_container(&mut cursor).ok()?;
+    let mut out = Vec::new();
+    for f in exif.fields() {
+        let value = f.display_value().to_string();
+        if !value.is_empty() {
+            out.push(MetadataEntry {
+                key: f.tag.to_string(),
+                value,
+            });
+        }
+    }
+    Some(out)
+}
+
 /// Detect and parse AI-generation prompts stored in the image.
 fn detect_ai_prompt(
     exif: &[MetadataEntry],
@@ -328,6 +478,50 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_exif_prompt_detected() {
+        // A JPEG whose prompt lives in EXIF ImageDescription (no COM)
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exif.jpg");
+        {
+            let img = image::RgbImage::from_pixel(16, 16, image::Rgb([1, 2, 3]));
+            img.save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        // Inject an EXIF APP1 carrying an ImageDescription with A1111 markers.
+        // Build a minimal EXIF blob: TIFF header + IFD0 with one SHORT tag.
+        let text: &[u8] = b"Steps: 20, Sampler: Euler";
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II*\0"); // little-endian TIFF, magic 42
+        tiff.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset
+        tiff.extend_from_slice(&1u16.to_le_bytes()); // 1 entry
+                                                     // tag 0x010E (ImageDescription), type 2 (ASCII), count = text len
+        tiff.extend_from_slice(&0x010Eu16.to_le_bytes());
+        tiff.extend_from_slice(&2u16.to_le_bytes());
+        tiff.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        // value offset must point into the data area: IFD0 at 8 (8-byte TIFF
+        // header) + 2-byte count + 12-byte entry + 4-byte next-IFD = 26.
+        tiff.extend_from_slice(&26u32.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+        tiff.extend_from_slice(text); // data area begins at byte 26
+
+        let mut exif_payload = b"Exif\0\0".to_vec();
+        exif_payload.extend_from_slice(&tiff);
+        let seg = jpeg_meta::JpegSegment {
+            marker: 0xE1,
+            data: exif_payload,
+        };
+        let with_exif = jpeg_meta::merge_missing_segments(&bytes, std::slice::from_ref(&seg));
+        std::fs::write(&path, &with_exif).unwrap();
+
+        let after = std::fs::read(&path).unwrap();
+        assert!(
+            find_jpeg_prompt_marker(&after),
+            "prompt stored in EXIF ImageDescription must be detected"
+        );
+    }
+
+    #[test]
     fn jpeg_comment_detected() {
         let exif = vec![];
         let chunks = vec![];
@@ -335,6 +529,97 @@ mod tests {
         let info = detect_ai_prompt(&exif, &chunks, &comments).unwrap();
         assert_eq!(info.source, "AUTOMATIC1111");
         assert!(info.params.contains("Steps: 20"));
+    }
+
+    #[test]
+    fn png_chunk_scanner_finds_ai_keyword() {
+        // A1111-style trailing parameters chunk
+        let mut bytes = Vec::new();
+        {
+            let w = &mut std::io::Cursor::new(&mut bytes);
+            let mut enc = png::Encoder::new(w, 2, 2);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().unwrap();
+            writer.write_image_data(&[0u8; 16]).unwrap();
+            writer
+                .write_text_chunk(&png::text_metadata::TEXtChunk::new(
+                    "parameters".to_string(),
+                    "Steps: 20".to_string(),
+                ))
+                .unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(find_png_ai_chunk(&bytes));
+    }
+
+    #[test]
+    fn png_chunk_scanner_ignores_plain_chunks() {
+        let mut bytes = Vec::new();
+        {
+            let w = &mut std::io::Cursor::new(&mut bytes);
+            let mut enc = png::Encoder::new(w, 2, 2);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().unwrap();
+            writer.write_image_data(&[0u8; 16]).unwrap();
+            writer
+                .write_text_chunk(&png::text_metadata::TEXtChunk::new(
+                    "Software".to_string(),
+                    "GIMP 2.10".to_string(),
+                ))
+                .unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(!find_png_ai_chunk(&bytes));
+    }
+
+    #[test]
+    fn check_prompts_filters_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let with_prompt = dir.path().join("a.png");
+        std::fs::write(&with_prompt, {
+            let mut bytes = Vec::new();
+            {
+                let w = &mut std::io::Cursor::new(&mut bytes);
+                let mut enc = png::Encoder::new(w, 2, 2);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                let mut writer = enc.write_header().unwrap();
+                writer.write_image_data(&[0u8; 16]).unwrap();
+                writer
+                    .write_text_chunk(&png::text_metadata::TEXtChunk::new(
+                        "workflow".to_string(),
+                        "{\"nodes\":[]}".to_string(),
+                    ))
+                    .unwrap();
+                writer.finish().unwrap();
+            }
+            bytes
+        })
+        .unwrap();
+
+        let no_prompt = dir.path().join("b.png");
+        {
+            let file = std::fs::File::create(&no_prompt).unwrap();
+            let mut enc = png::Encoder::new(file, 2, 2);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().unwrap();
+            writer.write_image_data(&[0u8; 16]).unwrap();
+            writer.finish().unwrap();
+        }
+        let missing = dir.path().join("nope.png");
+        let webp = dir.path().join("c.webp"); // unsupported extension
+        std::fs::write(&webp, b"not an image").unwrap();
+
+        let got = check_prompts(&[
+            with_prompt.to_string_lossy().into_owned(),
+            no_prompt.to_string_lossy().into_owned(),
+            missing.to_string_lossy().into_owned(),
+            webp.to_string_lossy().into_owned(),
+        ]);
+        assert_eq!(got, vec![with_prompt.to_string_lossy().into_owned()]);
     }
 
     /// `read_exif` must not error on files without EXIF and must find a known

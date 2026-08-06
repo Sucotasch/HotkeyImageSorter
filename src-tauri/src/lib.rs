@@ -319,6 +319,13 @@ async fn copy_text(text: String) -> Result<(), String> {
     clipboard.set_text(text).map_err(|e| e.to_string())
 }
 
+/// Returns the subset of `paths` whose files contain AI-generation metadata
+/// (used for the lazy "has prompt" badges in the list).
+#[tauri::command]
+async fn check_prompts(paths: Vec<String>) -> Vec<String> {
+    metadata::check_prompts(&paths)
+}
+
 #[tauri::command]
 async fn save_config(config: AppConfig) -> Result<(), String> {
     config::save_config(config)
@@ -422,7 +429,8 @@ pub fn run() {
             trash_images,
             hide_window,
             get_metadata,
-            copy_text
+            copy_text,
+            check_prompts
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

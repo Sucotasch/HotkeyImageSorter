@@ -69,10 +69,26 @@ body, html {
   cursor: pointer;
   border-bottom: 1px solid var(--border-color);
   border-left: 3px solid transparent;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.1s;
+}
+
+.list-item-name {
+  flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  transition: background 0.1s;
+}
+
+/* Lazy AI-prompt badge (✦) shown when the file carries generation metadata */
+.prompt-badge {
+  flex-shrink: 0;
+  color: var(--accent-color);
+  font-size: 11px;
+  cursor: help;
 }
 
 .list-item:hover {
