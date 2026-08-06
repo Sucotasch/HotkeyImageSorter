@@ -12,6 +12,18 @@ dist
 dist-ssr
 *.local
 
+# Temporary inspection scripts
+_dirlist.txt
+_inspect*.py
+_scan*.py
+_parse*.py
+_ucjson.py
+_allexif*.py
+_rawtiff.py
+_usercomment.py
+_kwscan.py
+_sort_probe.mjs
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
