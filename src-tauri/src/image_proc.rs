@@ -50,9 +50,52 @@ fn edit_image(
     }
 }
 
+/// Attempts a truly lossless JPEG rotation via libjpeg-turbo (no re-encoding).
+/// Returns `Ok(true)` if the lossless path was used, `Ok(false)` if the image
+/// cannot be transformed losslessly (dimensions not MCU-aligned, so the output
+/// would get ugly strips) and the caller should fall back to re-encoding, or
+/// `Err` on unexpected I/O failures.
+fn try_lossless_jpeg_rotate(path: &str, degrees: i32) -> Result<bool, String> {
+    if !matches!(degrees, 90 | 180 | 270) {
+        return Err("Invalid rotation degrees".to_string());
+    }
+    let original = std::fs::read(path).map_err(|e| e.to_string())?;
+    let op = match degrees {
+        90 => turbojpeg::TransformOp::Rot90,
+        180 => turbojpeg::TransformOp::Rot180,
+        270 => turbojpeg::TransformOp::Rot270,
+        _ => unreachable!(),
+    };
+    let mut transform = turbojpeg::Transform::op(op);
+    // Refuse imperfect transforms (partial MCU blocks on the edges): the
+    // caller re-encodes instead, so the output never has strip artifacts.
+    transform.perfect = true;
+
+    let rotated = match turbojpeg::transform(&transform, &original) {
+        Ok(buf) => buf,
+        Err(_) => return Ok(false),
+    };
+    let bytes: &[u8] = rotated.as_ref();
+    // turbojpeg already preserves EXIF/ICC/COM markers by default
+    // (`copy_none: false`); merge_missing_segments is an idempotent safety net.
+    let segments = jpeg_meta::extract_segments(&original);
+    let merged = jpeg_meta::merge_missing_segments(bytes, &segments);
+    std::fs::write(path, merged).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 pub fn rotate_image(path: &str, degrees: i32) -> Result<(), String> {
     if !matches!(degrees, 90 | 180 | 270) {
         return Err("Invalid rotation degrees".to_string());
+    }
+    // JPEGs get the lossless libjpeg-turbo path when possible; otherwise we
+    // fall back to the metadata-preserving re-encode.
+    if image::ImageFormat::from_path(path)
+        .map(|f| f == image::ImageFormat::Jpeg)
+        .unwrap_or(false)
+        && try_lossless_jpeg_rotate(path, degrees)?
+    {
+        return Ok(());
     }
     edit_image(path, |img| match degrees {
         90 => img.rotate90(),
@@ -140,6 +183,56 @@ mod tests {
 
     /// Builds a JPEG with a fake EXIF APP1 segment and a COM comment, then
     /// checks rotate keeps both.
+    /// Lossless rotation works when dimensions are MCU-aligned (multiples of
+    /// 16 for 4:2:0 subsampling). Verify the output stays a valid JPEG, keeps
+    /// markers and reports `Ok(true)` (i.e. the lossless path was taken).
+    #[test]
+    fn jpeg_lossless_rotate_on_mcu_aligned_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcu.jpg");
+        {
+            let img = image::RgbImage::from_pixel(64, 48, image::Rgb([200, 100, 50]));
+            img.save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let exif = jpeg_meta::JpegSegment {
+            marker: 0xE1,
+            data: b"Exif\0fake-orientation".to_vec(),
+        };
+        let with_meta = jpeg_meta::merge_missing_segments(&bytes, std::slice::from_ref(&exif));
+        std::fs::write(&path, &with_meta).unwrap();
+
+        assert!(try_lossless_jpeg_rotate(path.to_str().unwrap(), 90).unwrap());
+
+        let after = std::fs::read(&path).unwrap();
+        let segs = jpeg_meta::extract_segments(&after);
+        assert!(
+            segs.iter()
+                .any(|s| s.marker == 0xE1 && s.data.starts_with(b"Exif\0")),
+            "EXIF lost in lossless rotate"
+        );
+        // 64x48 rotated 90deg => 48x64
+        let img = image::load_from_memory(&after).unwrap();
+        let (w, h) = img.dimensions();
+        assert_eq!((w, h), (48, 64), "lossless rotate produced wrong size");
+    }
+
+    /// Non-MCU-aligned JPEGs must fall back to re-encode (Ok(false)) rather
+    /// than producing a strip artifact.
+    #[test]
+    fn jpeg_lossless_rotate_falls_back_when_imperfect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("odd.jpg");
+        {
+            let img = image::RgbImage::from_pixel(17, 9, image::Rgb([10, 20, 30]));
+            img.save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
+        }
+        // 17x9 is not divisible by the 16x16 MCU size → imperfect transform
+        assert!(!try_lossless_jpeg_rotate(path.to_str().unwrap(), 90).unwrap());
+    }
+
     #[test]
     fn jpeg_rotate_keeps_exif_and_comment() {
         let dir = tempfile::tempdir().unwrap();
