@@ -151,12 +151,27 @@ test('sort names ignores case entirely (a before Z)', () => {
   assert.deepEqual(sorted.map((i) => i.name), ['a.jpg', 'Z.jpg']);
 });
 
-test('sort names naturally: img2 before img10', () => {
+test('sort names by plain character order (no numeric interpretation)', () => {
+  // No natural-number sorting: digit runs are compared as characters, so
+  // "img10.jpg" < "img2.jpg" ('1' < '2'). This is the deliberate trade-off
+  // for keeping UUID-style filenames in textual order.
   const list = ['img10.jpg', 'img2.jpg', 'img1.jpg'].map(img);
   const sorted = [...list].sort((a, b) => compareImages(a, b, 'name', 1));
   assert.deepEqual(
     sorted.map((i) => i.name),
-    ['img1.jpg', 'img2.jpg', 'img10.jpg']
+    ['img1.jpg', 'img10.jpg', 'img2.jpg']
+  );
+});
+
+test('sort names: leading-zero name stays at the top (0 < 1 < 3)', () => {
+  // Regression: natural sort read "03e66bd5" as the number 3 and placed the
+  // file between "3d…" and "4a…". Plain character order puts the '0' file
+  // before the '1'-prefixed ones.
+  const list = ['3deafb68.png', '1d50e8c0.png', '03e66bd5.png', '4a4cf769.png'].map(img);
+  const sorted = [...list].sort((a, b) => compareImages(a, b, 'name', 1));
+  assert.deepEqual(
+    sorted.map((i) => i.name),
+    ['03e66bd5.png', '1d50e8c0.png', '3deafb68.png', '4a4cf769.png']
   );
 });
 

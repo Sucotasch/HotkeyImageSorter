@@ -29,7 +29,14 @@ pub fn get_metadata(path: &str) -> Result<ImageMetadata, String> {
 
     let exif = read_exif(path)?;
     let text_chunks = png_meta::extract_text_chunks(path).unwrap_or_default();
-    let comments = read_jpeg_comments(path);
+    // PNG/WebP/AVIF have no JPEG COM segments — running the JPEG walker over
+    // their bytes finds coincidental 0xFF 0xFE sequences and surfaces garbage
+    // as "JPEG comments", so only JPEG-family files are scanned.
+    let comments = if matches!(format.as_str(), "jpg" | "jpeg") {
+        read_jpeg_comments(path)
+    } else {
+        Vec::new()
+    };
 
     let ai = detect_ai_prompt(&exif, &text_chunks, &comments);
 
@@ -229,8 +236,62 @@ fn read_jpeg_comments(path: &str) -> Vec<String> {
     jpeg_meta::extract_segments(&bytes)
         .iter()
         .filter(|s| s.marker == 0xFE)
-        .map(|s| String::from_utf8_lossy(&s.data).into_owned())
+        .map(|s| decode_legacy_text(&s.data))
         .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Best-effort decoding of legacy JPEG comment bytes: strict UTF-8 first;
+/// when that fails, Windows-1251 when the payload is Cyrillic-heavy,
+/// otherwise ISO-8859-1 (each byte maps 1:1).
+fn decode_legacy_text(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    let high = bytes.iter().filter(|&&b| b >= 0x80).count();
+    let cyr = bytes
+        .iter()
+        .filter(|&&b| (0xC0..=0xFF).contains(&b))
+        .count();
+    if high > 0 && cyr * 3 >= high * 2 {
+        decode_cp1251(bytes)
+    } else {
+        bytes.iter().map(|&b| b as char).collect()
+    }
+}
+
+/// Windows-1251 (Cyrillic) decoder — the common encoding of legacy Russian
+/// JPEG comments.
+fn decode_cp1251(bytes: &[u8]) -> String {
+    // Code points for 0x80..=0xFF (hex literals keep the table corruption-
+    // proof and reviewable). 0x9E is undefined in CP1251 — mapped to NBSP.
+    const CP1251: [u16; 128] = [
+        0x0402, 0x0403, 0x201A, 0x0453, 0x201E, 0x2026, 0x2020, 0x2021, 0x20AC, 0x2030, 0x0409,
+        0x2039, 0x040A, 0x040C, 0x040B, 0x040F, // 0x80–0x8F
+        0x0452, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x2122, 0x0459, 0x045A,
+        0x045C, 0x045B, 0x045F, 0x00A0, 0x040E, // 0x90–0x9F
+        0x00A0, 0x045E, 0x0408, 0x00A4, 0x0490, 0x00A6, 0x00A7, 0x0401, 0x00A9, 0x0404, 0x00AB,
+        0x00AC, 0x00AD, 0x00AE, 0x0407, 0x00B0, // 0xA0–0xAF
+        0x00B1, 0x0406, 0x0456, 0x0491, 0x00B5, 0x00B6, 0x00B7, 0x0451, 0x2116, 0x0454, 0x00BB,
+        0x0458, 0x0405, 0x0455, 0x0457, 0x0410, // 0xB0–0xBF
+        0x0410, 0x0411, 0x0412, 0x0413, 0x0414, 0x0415, 0x0416, 0x0417, 0x0418, 0x0419, 0x041A,
+        0x041B, 0x041C, 0x041D, 0x041E, 0x041F, 0x0420, 0x0421, 0x0422, 0x0423, 0x0424, 0x0425,
+        0x0426, 0x0427, 0x0428, 0x0429, 0x042A, 0x042B, 0x042C, 0x042D, 0x042E,
+        0x042F, // А–Я
+        0x0430, 0x0431, 0x0432, 0x0433, 0x0434, 0x0435, 0x0436, 0x0437, 0x0438, 0x0439, 0x043A,
+        0x043B, 0x043C, 0x043D, 0x043E, 0x043F, 0x0440, 0x0441, 0x0442, 0x0443, 0x0444, 0x0445,
+        0x0446, 0x0447, 0x0448, 0x0449, 0x044A, 0x044B, 0x044C, 0x044D, 0x044E,
+        0x044F, // а–я
+    ];
+    bytes
+        .iter()
+        .map(|&b| {
+            if b < 0x80 {
+                b as char
+            } else {
+                char::from_u32(CP1251[(b - 0x80) as usize] as u32).unwrap_or('?')
+            }
+        })
         .collect()
 }
 
@@ -337,6 +398,9 @@ fn is_ai_keyword(keyword: &[u8]) -> bool {
             | b"metadata"
             | b"positive_prompt"
             | b"negative_prompt"
+            | b"generation_data"
+            | b"invokeai_metadata"
+            | b"invokeai_graph"
     )
 }
 
@@ -655,6 +719,128 @@ fn xml_unescape(s: &str) -> String {
         .replace("&apos;", "'")
 }
 
+/// Krea's `generation_data` PNG chunk: JSON with `models` (lora info) and the
+/// full `prompt` text (+ size/steps/seed/…). Some writers append a trailing
+/// NUL byte.
+fn parse_generation_data(raw: &str) -> Option<AiPromptInfo> {
+    let json = raw.trim_end_matches('\0').trim();
+    let v: serde_json::Value = serde_json::from_str(&sanitize_json_float_tokens(json)).ok()?;
+    let obj = v.as_object()?;
+    let prompt = obj
+        .get("prompt")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if prompt.is_empty() {
+        return None;
+    }
+    let negative = obj
+        .get("negative_prompt")
+        .and_then(|p| p.as_str())
+        .map(str::to_string);
+    let params: Vec<String> = obj
+        .iter()
+        .filter(|(k, _)| *k != "prompt" && *k != "negative_prompt")
+        .map(|(k, val)| format!("{k}: {}", json_value_to_string(val)))
+        .collect();
+    Some(AiPromptInfo {
+        source: "Krea".to_string(),
+        prompt,
+        negative_prompt: negative,
+        params: params.join("\n"),
+        raw: raw.to_string(),
+    })
+}
+
+/// InvokeAI z-image metadata: `invokeai_metadata` is a JSON object with
+/// `positive_prompt`/`negative_prompt` (+ model, loras, …); `invokeai_graph`
+/// is the workflow graph, whose texts are found by walking the JSON tree.
+fn parse_invokeai_metadata(keyword: &str, raw: &str) -> Option<AiPromptInfo> {
+    let v: serde_json::Value = serde_json::from_str(&sanitize_json_float_tokens(raw)).ok()?;
+    if keyword == "invokeai_metadata" {
+        let obj = v.as_object()?;
+        let prompt = obj
+            .get("positive_prompt")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if prompt.is_empty() {
+            return None;
+        }
+        let negative = obj
+            .get("negative_prompt")
+            .and_then(|p| p.as_str())
+            .map(str::to_string);
+        let params: Vec<String> = obj
+            .iter()
+            .filter(|(k, _)| *k != "positive_prompt" && *k != "negative_prompt")
+            .map(|(k, val)| format!("{k}: {}", json_value_to_string(val)))
+            .collect();
+        return Some(AiPromptInfo {
+            source: "InvokeAI".to_string(),
+            prompt,
+            negative_prompt: negative,
+            params: params.join("\n"),
+            raw: raw.to_string(),
+        });
+    }
+    // invokeai_graph: walk the tree for the prompt texts.
+    let mut positive: Option<String> = None;
+    let mut negative: Option<String> = None;
+    collect_json_texts(&v, &mut positive, &mut negative, 0);
+    let prompt = positive?.trim().to_string();
+    if prompt.is_empty() {
+        return None;
+    }
+    Some(AiPromptInfo {
+        source: "InvokeAI".to_string(),
+        prompt,
+        negative_prompt: negative,
+        params: String::new(),
+        raw: raw.to_string(),
+    })
+}
+
+/// Depth-limited walk over a JSON value collecting strings stored under
+/// prompt-like keys (InvokeAI graphs nest them arbitrarily deep).
+fn collect_json_texts(
+    v: &serde_json::Value,
+    positive: &mut Option<String>,
+    negative: &mut Option<String>,
+    depth: usize,
+) {
+    if depth > 16 || (positive.is_some() && negative.is_some()) {
+        return;
+    }
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map {
+                let kl = k.to_ascii_lowercase();
+                if let Some(s) = val.as_str() {
+                    let s = s.trim();
+                    if !s.is_empty() {
+                        if kl.contains("negative") && negative.is_none() {
+                            *negative = Some(s.to_string());
+                        } else if (kl.contains("positive") || kl == "prompt") && positive.is_none()
+                        {
+                            *positive = Some(s.to_string());
+                        }
+                    }
+                }
+                collect_json_texts(val, positive, negative, depth + 1);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for it in items {
+                collect_json_texts(it, positive, negative, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Detect and parse AI-generation prompts stored in the image.
 fn detect_ai_prompt(
     exif: &[MetadataEntry],
@@ -681,6 +867,22 @@ fn detect_ai_prompt(
     for c in text_chunks {
         match c.keyword.as_str() {
             "parameters" => {} // already handled above
+            // Krea stores the real prompt (plus model/lora lists) in its
+            // `generation_data` chunk; InvokeAI z-image in `invokeai_metadata`
+            // (`invokeai_graph` is the workflow graph — its texts are found
+            // by walking the JSON). Both are direct sources, preferred over
+            // the executed graph, which may only hold lora tags + LLM
+            // templates.
+            "generation_data" => {
+                if let Some(info) = parse_generation_data(&c.text) {
+                    return Some(info);
+                }
+            }
+            "invokeai_metadata" | "invokeai_graph" => {
+                if let Some(info) = parse_invokeai_metadata(&c.keyword, &c.text) {
+                    return Some(info);
+                }
+            }
             "prompt" | "workflow" => {
                 if let Some(info) = parse_comfyui_json(&c.keyword, &c.text) {
                     // A graph with no extractable text (e.g. a bare UI-workflow
@@ -930,85 +1132,261 @@ fn comfyui_node_text(
     node: &serde_json::Value,
     obj: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<String> {
-    comfyui_node_text_inner(node, obj, &mut Vec::new())
+    comfyui_node_text_inner(node, obj, &mut Vec::new(), false)
+}
+
+/// Adds a trimmed non-empty fragment, skipping JSON blobs and duplicates.
+fn push_fragment(fragments: &mut Vec<String>, s: &str) {
+    let s = s.trim();
+    if s.is_empty() || s.starts_with('{') {
+        return;
+    }
+    if !fragments.iter().any(|f| f == s) {
+        fragments.push(s.to_string());
+    }
+}
+
+/// True when the text is only `<lora:…>` tags (possibly comma-separated) —
+/// such a fragment is metadata (a model attachment), not a prompt.
+fn is_lora_tag_only(s: &str) -> bool {
+    let mut rest = s.trim();
+    loop {
+        let Some(i) = rest.find("<lora:") else {
+            break;
+        };
+        if !rest[..i].trim().is_empty() {
+            return false;
+        }
+        let Some(end) = rest[i..].find('>') else {
+            return false;
+        };
+        rest = rest[i + end + 1..].trim_start_matches(',').trim_start();
+    }
+    rest.trim().is_empty()
+}
+
+/// Detects LLM system-prompt boilerplate that some generators (Krea) embed
+/// in the executed graph — instructions to a prompt-rewriting model, not the
+/// generation prompt itself.
+fn is_system_template(s: &str) -> bool {
+    let t = s.trim_start();
+    t.starts_with("You are an expert prompt engineer")
+        || t.starts_with("You are a visual detail engine")
+        || (t.starts_with("You are an") && t.contains("text-to-image"))
+}
+
+/// A string that can serve as a generation prompt: not an LLM system
+/// template and not a bare LoRA tag. Used everywhere a candidate text is
+/// accepted or rejected, so the filter can never drift between paths.
+fn is_meaningful_prompt(s: &str) -> bool {
+    !is_system_template(s) && !is_lora_tag_only(s)
+}
+
+/// Krea-style LLM nodes store their output as JSON text inside a string
+/// node: either a plain object with a `prompt` / `high_level_description`
+/// key, or the `{"error":…, "raw":"```json\n{…}```"}` wrapper.
+fn extract_prompt_from_json(s: &str) -> Option<String> {
+    let mut text = s.trim().to_string();
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        if guard > 4 {
+            return None;
+        }
+        // Parse first: the wrapper may itself contain "```json" inside its
+        // `raw` string, so un-fencing must happen only once the outer JSON
+        // has been unwrapped.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&sanitize_json_float_tokens(&text))
+        {
+            // Krea wraps a failed LLM parse in {"error":…, "raw":"<json>"}.
+            if let Some(raw) = v.get("raw").and_then(|r| r.as_str()) {
+                let raw = raw.trim();
+                if raw == text.as_str() {
+                    return None;
+                }
+                text = raw.to_string();
+                continue;
+            }
+            for key in ["prompt", "positive_prompt", "high_level_description", "c"] {
+                if let Some(p) = v.get(key).and_then(|p| p.as_str()) {
+                    let p = p.trim();
+                    if !p.is_empty() && !p.starts_with('{') {
+                        return Some(p.to_string());
+                    }
+                }
+            }
+        }
+        // Not parseable: unwrap a ```json … ``` fenced block if present.
+        if let Some(start) = text.find("```json") {
+            if let Some(rel_end) = text[start + 7..].find("```") {
+                text = text[start + 7..start + 7 + rel_end].trim().to_string();
+                continue;
+            }
+        }
+        return None;
+    }
+}
+
+/// Keys of join-family nodes that are separators/controls rather than text
+/// operands (delimiters, `间隔符_separator`, `*_mode` switches, …).
+fn is_join_control_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    k == "delimiter"
+        || k == "sep"
+        || k.contains("separator")
+        || k.contains("delimiter")
+        || k.ends_with("_sep")
+        || k.contains("_mode")
+        || k.contains("single_line")
+}
+
+/// Ordered concatenation of a join-family node's operands (ConditioningConcat
+/// branches, StringConcatenate string_a/string_b, TextJoiner 文本N_textN,
+/// PromptDPBuilder part keys, …). Operands may be plain strings or links;
+/// serde_json maps iterate in key order, which matches the operand order of
+/// these nodes. Bare lora tags and LLM system templates are dropped.
+#[allow(clippy::ptr_arg)] // `Vec` is required: branches clone and extend it
+fn comfyui_join_parts(
+    inputs: &serde_json::Map<String, serde_json::Value>,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    visited: &mut Vec<String>,
+) -> Option<String> {
+    let delimiter = inputs
+        .get("delimiter")
+        .and_then(|d| d.as_str())
+        .filter(|d| !d.is_empty())
+        .unwrap_or(", ");
+    let mut parts: Vec<String> = Vec::new();
+    for (key, v) in inputs {
+        if is_join_control_key(key) {
+            continue;
+        }
+        let candidate: Option<String> = match v {
+            serde_json::Value::String(s) => {
+                let s = s.trim();
+                if s.is_empty() || s.starts_with('{') || !is_meaningful_prompt(s) {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                let Some(id) = arr.first().and_then(|x| x.as_str()) else {
+                    continue;
+                };
+                if visited.iter().any(|v| v == id) {
+                    None
+                } else {
+                    let sub_prefer = arr.get(1).and_then(|x| x.as_i64()).unwrap_or(0) >= 1;
+                    let mut sub = visited.clone();
+                    sub.push(id.to_string());
+                    obj.get(id)
+                        .and_then(|n| comfyui_node_text_inner(n, obj, &mut sub, sub_prefer))
+                }
+            }
+            _ => None,
+        };
+        if let Some(c) = candidate {
+            if !parts.iter().any(|p| p == &c) {
+                parts.push(c);
+            }
+        }
+    }
+    let joined = parts.join(delimiter);
+    if joined.trim().is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
 }
 
 fn comfyui_node_text_inner(
     node: &serde_json::Value,
     obj: &serde_json::Map<String, serde_json::Value>,
     visited: &mut Vec<String>,
+    prefer_negative: bool,
 ) -> Option<String> {
     let inputs = node.get("inputs").and_then(|i| i.as_object())?;
     let class_type = node
         .get("class_type")
         .and_then(|c| c.as_str())
         .unwrap_or("");
-    // 0) String-literal-family nodes (`PrimitiveStringMultiline`, `String
-    //    Literal`, …) hold the text in a `value` / `string` input — keys not
-    //    shared by model/lora loaders. A value that is itself structured JSON
-    //    (e.g. Crystools' `fileinfo` block) is metadata, not a prompt.
-    if class_type.contains("String") {
-        for key in ["value", "string"] {
-            if let Some(serde_json::Value::String(s)) = inputs.get(key) {
-                let s = s.trim();
-                if !s.is_empty() && !s.starts_with('{') {
-                    return Some(s.to_string());
-                }
-            }
-        }
+
+    // Join-family nodes (Concat / TextJoiner / JoinStrings /
+    // StringConcatenate / PromptDPBuilder): the prompt is the ordered
+    // concatenation of ALL operands — a first-found walk would stop at the
+    // alphabetically-first branch and truncate the prompt to its prefix.
+    let is_join = class_type.contains("Concat")
+        || class_type.contains("TextJoiner")
+        || class_type.contains("JoinStrings")
+        || class_type.contains("StringConcatenate")
+        || class_type.contains("PromptDPBuilder");
+    if is_join {
+        return comfyui_join_parts(inputs, obj, visited);
     }
-    // 1) Only *text* keys carry the prompt — never model/lora/unet names, so
-    //    walking a LoraLoader node cannot yield "model.safetensors".
-    //    `positive` / `negative` are used by Prompt-UI-style nodes
-    //    (WeiLinPromptUI, …), `string` by String Literal nodes.
-    for key in [
-        "text",
-        "prompt",
-        "positive",
-        "negative",
-        "positive_prompt",
-        "negative_prompt",
-    ] {
-        if let Some(serde_json::Value::String(s)) = inputs.get(key) {
+
+    // 1) Own text: the first standard key (priority order; negative-biased
+    //    when the node is reached via a negative output, e.g. `["n", 1]`)
+    //    that holds a meaningful string. This is authoritative — linked and
+    //    arbitrary-string candidates never override the node's own text.
+    let keys: &[&str] = if prefer_negative {
+        &[
+            "negative",
+            "negative_prompt",
+            "text_negative",
+            "text",
+            "prompt",
+            "positive",
+            "positive_prompt",
+            "text_positive",
+            "value",
+            "string",
+        ]
+    } else {
+        &[
+            "text",
+            "prompt",
+            "positive",
+            "positive_prompt",
+            "text_positive",
+            "negative",
+            "negative_prompt",
+            "text_negative",
+            "value",
+            "string",
+        ]
+    };
+    for key in keys {
+        if let Some(serde_json::Value::String(s)) = inputs.get(*key) {
             let s = s.trim();
-            if !s.is_empty() && !s.starts_with('{') {
+            // Own text is authoritative, but never when it is only a LoRA
+            // tag or an LLM system template (Krea's TextGenerate embeds its
+            // system prompt in `prompt`) — those must fall through to the
+            // link/candidate walk, which applies the filters per candidate.
+            if !s.is_empty() && !s.starts_with('{') && is_meaningful_prompt(s) {
                 return Some(s.to_string());
             }
         }
     }
-    // 1.5) `ConditioningConcat`-family nodes: the full prompt is the
-    //      concatenation of ALL conditioning branches, not the first one
-    //      reachable. (serde_json Maps iterate alphabetically, so a plain
-    //      first-found walk would stop at `conditioning_from` and drop
-    //      `conditioning_to` — truncating the prompt to its prefix.)
-    if class_type.contains("Concat") {
-        let mut parts: Vec<String> = Vec::new();
-        for v in inputs.values() {
-            let serde_json::Value::Array(arr) = v else {
-                continue;
-            };
-            let Some(id) = arr.first().and_then(|x| x.as_str()) else {
-                continue;
-            };
-            if visited.iter().any(|v| v == id) {
-                continue;
-            }
-            visited.push(id.to_string());
-            if let Some(next) = obj.get(id) {
-                if let Some(t) = comfyui_node_text_inner(next, obj, visited) {
-                    if !parts.iter().any(|p| p == &t) {
-                        parts.push(t);
+    // 1.5) String-literal nodes may hold a structured JSON blob (Krea writes
+    //      its LLM output there) — extract the prompt from it.
+    if class_type.contains("String") {
+        for key in ["value", "string"] {
+            if let Some(serde_json::Value::String(s)) = inputs.get(key) {
+                if s.trim_start().starts_with('{') {
+                    if let Some(p) = extract_prompt_from_json(s) {
+                        return Some(p);
                     }
                 }
             }
         }
-        if !parts.is_empty() {
-            return Some(parts.join("\n"));
-        }
     }
-    // 2) Follow any input that is a link (`["node_id", out]`) — the prompt
-    //    chains through `conditioning` ports and `Switch` nodes in Krea/Krea-
-    //    style graphs.
+
+    // 2) Follow every link input (conditioning ports, switch branches, …).
+    //    Each branch gets its own visited clone (cycles stay guarded within a
+    //    branch), and the output index of EACH link decides whether the
+    //    target is read as a positive or negative output.
+    let mut candidates: Vec<String> = Vec::new();
     for v in inputs.values() {
         let serde_json::Value::Array(arr) = v else {
             continue;
@@ -1019,24 +1397,77 @@ fn comfyui_node_text_inner(
         if visited.iter().any(|v| v == id) {
             continue;
         }
-        visited.push(id.to_string());
+        let sub_prefer = arr.get(1).and_then(|x| x.as_i64()).unwrap_or(0) >= 1;
+        let mut sub = visited.clone();
+        sub.push(id.to_string());
         if let Some(next) = obj.get(id) {
-            if let Some(t) = comfyui_node_text_inner(next, obj, visited) {
-                return Some(t);
+            if let Some(t) = comfyui_node_text_inner(next, obj, &mut sub, sub_prefer) {
+                push_fragment(&mut candidates, &t);
             }
         }
     }
-    None
+    // 3) Text-family nodes can carry the prompt under arbitrary (often
+    //    localized) key names (CLIPTextEncode with custom widgets, …). LLM/API
+    //    nodes are excluded — their system prompts and endpoint URLs are not
+    //    generation prompts. Short values are controls ("none", "comfy", …).
+    if !class_type.contains("LLM")
+        && (class_type.contains("Text")
+            || class_type.contains("Prompt")
+            || class_type.contains("Encode")
+            || class_type.contains("String"))
+    {
+        for (_key, v) in inputs {
+            if let serde_json::Value::String(s) = v {
+                if s.trim().len() > 10 {
+                    push_fragment(&mut candidates, s);
+                }
+            }
+        }
+    }
+
+    // Switches and multi-branch chains expose several candidate texts; the
+    // most informative (longest) meaningful one is the prompt.
+    candidates
+        .iter()
+        .filter(|f| is_meaningful_prompt(f))
+        .max_by_key(|f| f.len())
+        .map(|f| f.to_string())
 }
 
 /// Resolves a ComfyUI link value (`["node_id", output]`) to the referenced
-/// node's prompt text (following any further text links).
+/// node's prompt text (following any further text links). The output index
+/// matters for nodes with separate positive/negative outputs: index ≥ 1
+/// selects the negative text.
 fn comfyui_link_text(
     link: &serde_json::Value,
     obj: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<String> {
-    let id = link.as_array()?.first()?.as_str()?;
-    comfyui_node_text(obj.get(id)?, obj)
+    let arr = link.as_array()?;
+    let id = arr.first()?.as_str()?;
+    let out = arr.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+    comfyui_node_text_inner(obj.get(id)?, obj, &mut Vec::new(), out >= 1)
+}
+
+/// Resolves a sampler node's `positive`/`negative` conditioning. Classic
+/// KSamplers carry them as direct link inputs; `SamplerCustomAdvanced`-family
+/// nodes route the conditioning through a `guider` link (DualModelGuider,
+/// CFGGuider), so the guider node's inputs are consulted as well.
+fn resolve_sampler_input(
+    inputs: &serde_json::Value,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    if let Some(link) = inputs.get(key) {
+        if let Some(t) = comfyui_link_text(link, obj) {
+            return Some(t);
+        }
+    }
+    let guider = inputs.get("guider")?;
+    let guider_id = guider.as_array()?.first()?.as_str()?;
+    let guider_node = obj.get(guider_id)?;
+    let ginputs = guider_node.get("inputs")?.as_object()?;
+    let link = ginputs.get(key)?;
+    comfyui_link_text(link, obj)
 }
 
 /// Parses a ComfyUI `prompt`/`workflow` JSON and extracts the prompt texts.
@@ -1102,7 +1533,8 @@ fn parse_comfyui_json(keyword: &str, json: &str) -> Option<AiPromptInfo> {
     let v: serde_json::Value = serde_json::from_str(&sanitize_json_float_tokens(json)).ok()?;
     let obj = v.as_object()?;
 
-    // Executed-prompt graphs: follow the sampler's positive/negative links.
+    // Executed-prompt graphs: follow the sampler's positive/negative links
+    // (through the `guider` for SamplerCustomAdvanced-family samplers).
     let mut positive: Option<String> = None;
     let mut negative: Option<String> = None;
     for (_, node) in obj {
@@ -1117,14 +1549,10 @@ fn parse_comfyui_json(keyword: &str, json: &str) -> Option<AiPromptInfo> {
             continue;
         };
         if positive.is_none() {
-            positive = inputs
-                .get("positive")
-                .and_then(|l| comfyui_link_text(l, obj));
+            positive = resolve_sampler_input(inputs, obj, "positive");
         }
         if negative.is_none() {
-            negative = inputs
-                .get("negative")
-                .and_then(|l| comfyui_link_text(l, obj));
+            negative = resolve_sampler_input(inputs, obj, "negative");
         }
     }
     // Only take the sampler path when the *positive* text resolved — a
@@ -1977,6 +2405,122 @@ mod tests {
         assert_eq!(
             info.negative_prompt.as_deref(),
             Some("worst quality, blurry")
+        );
+    }
+
+    #[test]
+    fn comfyui_guider_sampler_resolved() {
+        // SamplerCustomAdvanced has no positive/negative inputs — the
+        // conditioning flows through the `guider` link (DualModelGuider).
+        let json = r#"{"360:344":{"class_type":"SamplerCustomAdvanced","inputs":{"guider":["360:353",0],"sampler":["360:351",0],"noise":["360:355",0],"sigmas":["360:354",0],"latent_image":["360:348",0]}},"360:353":{"class_type":"DualModelGuider","inputs":{"positive":["360:346",0],"negative":["360:347",0]}},"360:346":{"class_type":"CLIPTextEncode","inputs":{"text":["362",0]}},"362":{"class_type":"PrimitiveStringMultiline","inputs":{"value":"a red-haired woman in a shower"}},"360:347":{"class_type":"ConditioningZeroOut","inputs":{"conditioning":["360:346",0]}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert!(info.prompt.contains("a red-haired woman in a shower"));
+        assert_eq!(info.negative_prompt, None);
+    }
+
+    #[test]
+    fn comfyui_string_concatenate_operands_joined() {
+        // Real `03e66bd5`: KSampler → CLIPTextEncode → StringConcatenate
+        // whose operands are plain strings (`string_a`/`string_b`).
+        let json = r#"{"163":{"class_type":"KSampler","inputs":{"positive":["6",0],"negative":["190",0]}},"6":{"class_type":"CLIPTextEncode","inputs":{"text":["214",0]}},"214":{"class_type":"StringConcatenate","inputs":{"string_a":"","string_b":"digital art, anime style, silhouetted female character","delimiter":", "}},"190":{"class_type":"ConditioningZeroOut","inputs":{"conditioning":["6",0]}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert!(info
+            .prompt
+            .contains("digital art, anime style, silhouetted female character"));
+    }
+
+    #[test]
+    fn comfyui_lora_tag_not_taken_as_prompt() {
+        // Real `4d66d213`: the positive chain first meets a Lora Loader whose
+        // `text` is a bare `<lora:…>` tag; the real prompt sits deeper in a
+        // switch branch. The resolver must prefer the meaningful text.
+        let json = r#"{"19":{"class_type":"KSampler","inputs":{"positive":["11",0],"negative":["84",0]}},"11":{"class_type":"CLIPTextEncode","inputs":{"text":["73",0]}},"73":{"class_type":"JoinStrings","inputs":{"delimiter":" ","string1":["72",0],"string2":["81",0]}},"72":{"class_type":"TriggerWord Toggle (LoraManager)","inputs":{"trigger_words":["71",2]}},"71":{"class_type":"Lora Loader (LoraManager)","inputs":{"text":"<lora:Brom_Krea2_v2:1.00>"}},"81":{"class_type":"ComfySwitchNode","inputs":{"switch":false,"on_false":["88",0]}},"88":{"class_type":"DPRandomGenerator","inputs":{"text":"A feral vampire noblewoman reclining inside a decaying palace"}},"84":{"class_type":"ConditioningZeroOut","inputs":{"conditioning":["11",0]}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert!(info.prompt.contains("feral vampire noblewoman"));
+        assert!(!info.prompt.contains("<lora:"));
+        assert_eq!(info.negative_prompt, None);
+    }
+
+    #[test]
+    fn comfyui_system_template_filtered() {
+        // Krea's TextGenerate embeds its LLM system template in the executed
+        // graph; with the user text generated at runtime it must not become
+        // the prompt.
+        let json = r#"{"1":{"class_type":"KSampler","inputs":{"positive":["2",0]}},"2":{"class_type":"CLIPTextEncode","inputs":{"text":["3",0]}},"3":{"class_type":"TextGenerate","inputs":{"prompt":"You are an expert prompt engineer for text-to-image models. Your task is to expand the user's prompt into a highly effective image-generation prompt."}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert!(info.prompt.is_empty(), "system template is not a prompt");
+    }
+
+    #[test]
+    fn comfyui_json_literal_prompt_extracted() {
+        // Real `1e71cafd`: PrimitiveStringMultiline holds Krea's LLM output
+        // as {"error":…,"raw":"```json\n{…}```"} — the prompt is inside.
+        let json = r#"{"1":{"class_type":"KSampler","inputs":{"positive":["2",0]}},"2":{"class_type":"CLIPTextEncode","inputs":{"text":["3",0]}},"3":{"class_type":"PrimitiveStringMultiline","inputs":{"value":"{\"error\":\"no_json_found\",\"raw\":\"```json\\n{\\\"aspect_ratio\\\": \\\"4:5\\\",\\\"high_level_description\\\": \\\"A wet, red-haired woman looks up\\\"}```\"}"}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert!(info.prompt.contains("A wet, red-haired woman looks up"));
+    }
+
+    #[test]
+    fn generation_data_chunk_extracts_prompt() {
+        // Real `5dec8a08`: Krea writes the real prompt in `generation_data`
+        // (with a trailing NUL); the executed graph holds only lora tags.
+        let raw = "{\"models\":[{\"type\":\"LORA\",\"label\":\"v1. 0\"}],\"prompt\":\"Realistic masterpiece. A young Latina woman with tan skin is bound to a wooden beam\",\"width\":768,\"steps\":10}\u{0}";
+        let info = parse_generation_data(raw).unwrap();
+        assert_eq!(info.source, "Krea");
+        assert!(info.prompt.contains("Realistic masterpiece"));
+        assert!(info.params.contains("width: 768"));
+    }
+
+    #[test]
+    fn invokeai_metadata_chunk_extracts_prompt() {
+        // Real `3deafb68`: InvokeAI z-image metadata carries the prompt.
+        let raw = "{\"generation_mode\":\"z_image_txt2img\",\"positive_prompt\":\"LuisRoyo painting of an intense woman\",\"negative_prompt\":\"blurry\",\"steps\":28,\"model\":{\"key\":\"x\"}}";
+        let info = parse_invokeai_metadata("invokeai_metadata", raw).unwrap();
+        assert_eq!(info.source, "InvokeAI");
+        assert!(info.prompt.contains("LuisRoyo painting"));
+        assert_eq!(info.negative_prompt.as_deref(), Some("blurry"));
+        assert!(info.params.contains("steps: 28"));
+    }
+
+    #[test]
+    fn comfyui_text_joiner_joins_branches_with_styler_negative() {
+        // Real `5e419914`: TextJoiner joins the quality tags, the style and
+        // the extracted description; the negative chain reaches the styler's
+        // negative output via `["n", 1]`.
+        let json = r#"{"30":{"class_type":"KSampler (Efficient)","inputs":{"positive":["28",0],"negative":["29",0]}},"28":{"class_type":"CLIPTextEncode","inputs":{"text":["4",0]}},"4":{"class_type":"TextJoiner","inputs":{"text1":["2",0],"text2":["3",0]}},"2":{"class_type":"SDXLPromptStyler","inputs":{"text_positive":"masterpiece, best quality, highres","text_negative":"worst quality, low quality, blurry"}},"3":{"class_type":"AnimaStyleExplorer","inputs":{"text":"anime coloring, "}},"29":{"class_type":"CLIPTextEncode","inputs":{"text":["2",1]}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert!(info.prompt.contains("masterpiece, best quality, highres"));
+        assert!(info.prompt.contains("anime coloring"));
+        assert_eq!(
+            info.negative_prompt.as_deref(),
+            Some("worst quality, low quality, blurry")
+        );
+    }
+
+    #[test]
+    fn cp1251_comment_decoded() {
+        // "Привет, мир" in Windows-1251 (legacy JPEG comment encoding) must
+        // decode to text instead of U+FFFD replacement characters.
+        let bytes = b"\xCF\xF0\xE8\xE2\xE5\xF2, \xEC\xE8\xF0";
+        assert_eq!(decode_legacy_text(bytes), "Привет, мир");
+    }
+
+    #[test]
+    fn png_files_have_no_jpeg_comments() {
+        // Regression: read_jpeg_comments was run on every file; on PNG bytes
+        // the JPEG segment walker found coincidental 0xFF 0xFE sequences and
+        // surfaced garbage as "JPEG comments".
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.png");
+        {
+            let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 4]));
+            img.save(&path).unwrap();
+        }
+        let meta = get_metadata(path.to_str().unwrap()).unwrap();
+        assert_eq!(meta.format, "png");
+        assert!(
+            meta.comments.is_empty(),
+            "PNG must not produce JPEG comments"
         );
     }
 

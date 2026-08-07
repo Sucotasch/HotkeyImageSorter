@@ -52,6 +52,13 @@ function anyModalOpen() {
          !el.modalMetadata.classList.contains('hidden');
 }
 
+// File-operation hotkeys (Delete, A–Z move) stay active while the metadata
+// modal is open, so files can be triaged by prompt presence without closing
+// it; only the settings modal (editable fields) blocks them.
+function settingsModalOpen() {
+  return !el.modalSettings.classList.contains('hidden');
+}
+
 // Transient error/info toast
 let toastTimer;
 function notify(msg, isError = true) {
@@ -219,6 +226,11 @@ async function loadFiles(initialLoadPath = null) {
     // The current image may have disappeared (deleted/moved last file) — hide
     // the corner button so it never points at a stale selection.
     updateMetaCorner();
+    // With nothing left to view, the metadata modal must not keep showing the
+    // removed file's data.
+    if (state.images.length === 0 && !el.modalMetadata.classList.contains('hidden')) {
+      el.metadataBody.innerHTML = '<div class="metadata-noai">No images left.</div>';
+    }
   } catch (err) {
     state.images = [];
     promptPaths.clear();
@@ -596,7 +608,7 @@ async function handleGlobalKeydown(e) {
             renderList();
         }
     }
-  } else if ((code === 'Delete' || key === 'delete') && !e.ctrlKey && !e.metaKey && !e.altKey && !anyModalOpen()) {
+  } else if ((code === 'Delete' || key === 'delete') && !e.ctrlKey && !e.metaKey && !e.altKey && !settingsModalOpen()) {
     if (state.currentPath) {
       const pathsToRemove = state.selectedPaths.size > 0 ? Array.from(state.selectedPaths) : [state.currentPath];
       
@@ -655,7 +667,7 @@ async function handleGlobalKeydown(e) {
   } else if ((key === 'enter' || code === 'Enter') && !(active && active.tagName === 'BUTTON') && !anyModalOpen()) {
     e.preventDefault();
     await toggleFullscreen();
-  } else if (code && code.startsWith('Key') && !e.ctrlKey && !e.metaKey && !e.altKey && !anyModalOpen()) {
+  } else if (code && code.startsWith('Key') && !e.ctrlKey && !e.metaKey && !e.altKey && !settingsModalOpen()) {
     const char = code.replace('Key', '').toLowerCase();
     const targetDir = state.config.hotkeys[char];
     if (targetDir && state.currentPath) {

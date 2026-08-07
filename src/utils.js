@@ -25,11 +25,11 @@ export function computeVisibleRange(scrollTop, viewportH, rowH, total, overscan)
 /**
  * Compare two list entries for sorting.
  *
- * Names use a locale-aware, case-insensitive comparison with natural numeric
- * ordering ("img2.jpg" < "img10.jpg"; "apple" before "Zebra") — a
- * case-sensitive byte comparison would sort every uppercase name before every
- * lowercase one, producing two passes over the alphabet. Equal values return
- * 0 (required for a stable sort).
+ * Names use a case-insensitive, plain character-order comparison ("apple"
+ * before "Zebra"; "03e66bd5…" before "1d50e8c0…" because '0' < '1'). A
+ * numeric-aware natural sort would read the leading "03" as the number 3 and
+ * push the file into the '3' group — confusing for UUID-style filenames.
+ * Equal values return 0 (required for a stable sort).
  *
  * @param {object} a  ImageInfo entry
  * @param {object} b  ImageInfo entry
@@ -41,10 +41,7 @@ export function compareImages(a, b, by, dir) {
   const valB = b[by];
   let cmp;
   if (by === 'name') {
-    cmp = String(valA).localeCompare(String(valB), undefined, {
-      sensitivity: 'base',
-      numeric: true,
-    });
+    cmp = compareNames(String(valA), String(valB));
   } else if (valA < valB) {
     cmp = -1;
   } else if (valA > valB) {
@@ -53,6 +50,16 @@ export function compareImages(a, b, by, dir) {
     cmp = 0;
   }
   return cmp === 0 ? 0 : cmp * dir;
+}
+
+/**
+ * Case-insensitive plain character-order comparison (no numeric
+ * interpretation of digit runs).
+ */
+function compareNames(a, b) {
+  const na = a.toLowerCase();
+  const nb = b.toLowerCase();
+  return na < nb ? -1 : na > nb ? 1 : 0;
 }
 
 export function escapeHtml(value) {
