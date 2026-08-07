@@ -939,28 +939,71 @@ fn comfyui_node_text_inner(
     visited: &mut Vec<String>,
 ) -> Option<String> {
     let inputs = node.get("inputs").and_then(|i| i.as_object())?;
-    // 0) `PrimitiveString`-family nodes (PrimitiveStringMultiline, …) hold the
-    //    text in a `value` input — a key not shared by model/lora loaders.
     let class_type = node
         .get("class_type")
         .and_then(|c| c.as_str())
         .unwrap_or("");
-    if class_type.contains("PrimitiveString") {
-        if let Some(serde_json::Value::String(s)) = inputs.get("value") {
-            let s = s.trim();
-            if !s.is_empty() {
-                return Some(s.to_string());
+    // 0) String-literal-family nodes (`PrimitiveStringMultiline`, `String
+    //    Literal`, …) hold the text in a `value` / `string` input — keys not
+    //    shared by model/lora loaders. A value that is itself structured JSON
+    //    (e.g. Crystools' `fileinfo` block) is metadata, not a prompt.
+    if class_type.contains("String") {
+        for key in ["value", "string"] {
+            if let Some(serde_json::Value::String(s)) = inputs.get(key) {
+                let s = s.trim();
+                if !s.is_empty() && !s.starts_with('{') {
+                    return Some(s.to_string());
+                }
             }
         }
     }
     // 1) Only *text* keys carry the prompt — never model/lora/unet names, so
     //    walking a LoraLoader node cannot yield "model.safetensors".
-    for key in ["text", "prompt", "positive_prompt", "negative_prompt"] {
+    //    `positive` / `negative` are used by Prompt-UI-style nodes
+    //    (WeiLinPromptUI, …), `string` by String Literal nodes.
+    for key in [
+        "text",
+        "prompt",
+        "positive",
+        "negative",
+        "positive_prompt",
+        "negative_prompt",
+    ] {
         if let Some(serde_json::Value::String(s)) = inputs.get(key) {
             let s = s.trim();
-            if !s.is_empty() {
+            if !s.is_empty() && !s.starts_with('{') {
                 return Some(s.to_string());
             }
+        }
+    }
+    // 1.5) `ConditioningConcat`-family nodes: the full prompt is the
+    //      concatenation of ALL conditioning branches, not the first one
+    //      reachable. (serde_json Maps iterate alphabetically, so a plain
+    //      first-found walk would stop at `conditioning_from` and drop
+    //      `conditioning_to` — truncating the prompt to its prefix.)
+    if class_type.contains("Concat") {
+        let mut parts: Vec<String> = Vec::new();
+        for v in inputs.values() {
+            let serde_json::Value::Array(arr) = v else {
+                continue;
+            };
+            let Some(id) = arr.first().and_then(|x| x.as_str()) else {
+                continue;
+            };
+            if visited.iter().any(|v| v == id) {
+                continue;
+            }
+            visited.push(id.to_string());
+            if let Some(next) = obj.get(id) {
+                if let Some(t) = comfyui_node_text_inner(next, obj, visited) {
+                    if !parts.iter().any(|p| p == &t) {
+                        parts.push(t);
+                    }
+                }
+            }
+        }
+        if !parts.is_empty() {
+            return Some(parts.join("\n"));
         }
     }
     // 2) Follow any input that is a link (`["node_id", out]`) — the prompt
@@ -1891,6 +1934,50 @@ mod tests {
         assert!(info.prompt.contains("(masterpiece, best quality)"));
         assert!(info.prompt.contains("a red car"));
         assert!(info.params.contains("\"nodes\""));
+    }
+
+    #[test]
+    fn comfyui_string_literal_chain_resolved() {
+        // Real `1.png`: KSampler → CLIPTextEncode.text=["97",0] →
+        // ImpactSwitch.input1=["96",0] → String Literal (`string` key, not
+        // `text`/`value`). The sampler link must resolve through the whole
+        // chain to the literal.
+        let json = r#"{"9":{"class_type":"KSampler","inputs":{"positive":["4",0],"negative":["10",0]}},"4":{"class_type":"CLIPTextEncode","inputs":{"text":["97",0]}},"97":{"class_type":"ImpactSwitch","inputs":{"input1":["96",0]}},"96":{"class_type":"String Literal","inputs":{"string":"ttai_lalk@v2, lezdom, domination"}},"10":{"class_type":"ConditioningZeroOut","inputs":{"conditioning":["4",0]}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert_eq!(info.source, "ComfyUI");
+        assert!(info.prompt.contains("ttai_lalk@v2, lezdom, domination"));
+        // Zeroed negative shares the positive chain → dropped
+        assert_eq!(info.negative_prompt, None);
+    }
+
+    #[test]
+    fn comfyui_crystools_json_literal_not_taken_as_prompt() {
+        // Crystools "Load image with metadata" writes a String Literal whose
+        // value is a JSON `fileinfo` block (starts with `{`). It must not be
+        // mistaken for the prompt — and a graph with only that literal yields
+        // no prompt at all.
+        let json = r#"{"13":{"class_type":"String Literal","inputs":{"string":"{\n  \"fileinfo\": {\"filename\": \"D:/x.png\"}\n}"}},"4":{"class_type":"Metadata extractor [Crystools]","inputs":{"metadata_raw":["1",3]}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert!(info.prompt.is_empty(), "fileinfo JSON is not a prompt");
+    }
+
+    #[test]
+    fn comfyui_concat_joins_all_branches() {
+        // Real `1a2ff84a`: KSampler.positive → ConditioningConcat whose
+        // `conditioning_from` (node 48) and `conditioning_to` (node 55, a
+        // WeiLinPromptUI storing the text in `positive`) both contribute to
+        // the final prompt. All branches must be joined, not just the first
+        // reachable one (which truncated the prompt to its prefix).
+        let json = r#"{"19":{"class_type":"KSampler","inputs":{"positive":["49",0],"negative":["12",0]}},"49":{"class_type":"ConditioningConcat","inputs":{"conditioning_from":["48",0],"conditioning_to":["55",1]}},"48":{"class_type":"CLIPTextEncode","inputs":{"text":"masterpiece, best quality, score_7."}},"55":{"class_type":"WeiLinPromptUI","inputs":{"positive":"tangxuan, 1girl, solo, long hair, maid"}},"12":{"class_type":"CLIPTextEncode","inputs":{"text":"worst quality, blurry"}}}"#;
+        let info = parse_comfyui_json("prompt", json).unwrap();
+        assert!(info.prompt.contains("masterpiece, best quality, score_7."));
+        assert!(info
+            .prompt
+            .contains("tangxuan, 1girl, solo, long hair, maid"));
+        assert_eq!(
+            info.negative_prompt.as_deref(),
+            Some("worst quality, blurry")
+        );
     }
 
     #[test]
