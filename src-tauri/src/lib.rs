@@ -11,6 +11,7 @@ use crate::models::{AppConfig, ImageInfo, UndoAction, UndoActionType};
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
 
@@ -20,6 +21,64 @@ const MAX_HISTORY: usize = 10;
 struct AppState {
     history: Mutex<Vec<Vec<UndoAction>>>,
     redo_history: Mutex<Vec<Vec<UndoAction>>>,
+}
+
+/// The path the app was launched with (e.g. Windows "Open with…"), handed to
+/// the frontend at startup and replaced on subsequent single-instance
+/// launches.
+struct LaunchArgs(Mutex<Option<String>>);
+
+/// A launch target for the frontend: a folder to list, or a file to show (its
+/// parent folder is listed and the file is selected).
+#[derive(Clone, serde::Serialize)]
+struct LaunchTarget {
+    path: String,
+    is_dir: bool,
+    dir: String,
+}
+
+fn make_launch_target(path: &str) -> Option<LaunchTarget> {
+    // Normalise relative paths (e.g. `pic.jpg`) to absolute so a file's
+    // parent is never the empty path.
+    let p = std::path::absolute(path).ok()?;
+    if p.is_dir() {
+        Some(LaunchTarget {
+            path: path.to_string(),
+            is_dir: true,
+            dir: path.to_string(),
+        })
+    } else if p.is_file() {
+        let dir = p.parent()?.to_string_lossy().into_owned();
+        Some(LaunchTarget {
+            path: path.to_string(),
+            is_dir: false,
+            dir,
+        })
+    } else {
+        None
+    }
+}
+
+/// Picks the first existing filesystem path from the process arguments,
+/// skipping the binary itself — i.e. the file or folder the app was asked to
+/// open ("Open with…" on Windows passes the path as argv[1]).
+fn first_launch_path(args: &[String]) -> Option<String> {
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|e| e.to_string_lossy().into_owned());
+    args.iter()
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty() && exe.as_deref() != Some(a.as_str()))
+        .find(|a| std::path::Path::new(a).exists())
+}
+
+/// One-shot: returns the path the app was launched with (a folder, or a file
+/// whose folder should be opened with the file selected), then clears it so a
+/// plain restart never reopens a stale path.
+#[tauri::command]
+fn get_launch_target(state: State<'_, LaunchArgs>) -> Option<LaunchTarget> {
+    let path = state.0.lock().ok()?.take()?;
+    make_launch_target(&path)
 }
 
 /// Records a completed operation batch: pushes to history, truncates the oldest
@@ -367,6 +426,15 @@ pub fn run() {
             // Remove crash leftovers from previous runs (best effort).
             backup::cleanup_stale_sessions(std::time::Duration::from_secs(24 * 3600));
 
+            // "Open with…" passes the path as a command-line argument: keep it
+            // for the frontend, which consumes it at startup. Managed here so
+            // it is registered by the time the webview invokes commands.
+            // args_os (not args) so a non-UTF-8 path from Explorer can't panic.
+            let args: Vec<String> = std::env::args_os()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            app.manage(LaunchArgs(Mutex::new(first_launch_path(&args))));
+
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
@@ -403,7 +471,14 @@ pub fn run() {
 
             Ok(())
         })
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // A second instance was started with a path ("Open with…" while
+            // the app is already running): forward it to the frontend.
+            if let Some(path) = first_launch_path(&args) {
+                if let Some(target) = make_launch_target(&path) {
+                    let _ = app.emit("open-file", target);
+                }
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -430,7 +505,8 @@ pub fn run() {
             hide_window,
             get_metadata,
             copy_text,
-            check_prompts
+            check_prompts,
+            get_launch_target
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -557,5 +633,40 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "original");
         assert!(redo.is_empty(), "redo must drain redo");
         assert_eq!(history.len(), 1, "redo must restore history");
+    }
+
+    #[test]
+    fn first_launch_path_picks_existing_path_after_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pic.jpg");
+        std::fs::write(&file, b"x").unwrap();
+        let file_str = file.to_string_lossy().into_owned();
+        // argv[0] is the binary; the real path is argv[1] ("Open with…").
+        let args = vec!["ignored-exe".to_string(), file_str.clone()];
+        assert_eq!(first_launch_path(&args).as_deref(), Some(file_str.as_str()));
+        // Missing paths are skipped entirely.
+        let args = vec!["C:\\definitely\\missing.jpg".to_string()];
+        assert_eq!(first_launch_path(&args), None);
+    }
+
+    #[test]
+    fn make_launch_target_distinguishes_file_and_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pic.jpg");
+        std::fs::write(&file, b"x").unwrap();
+        let dir_str = dir.path().to_string_lossy().into_owned();
+        let file_str = file.to_string_lossy().into_owned();
+
+        let t = make_launch_target(&dir_str).unwrap();
+        assert!(t.is_dir, "folder target must be a dir");
+        assert_eq!(t.dir, dir_str);
+        assert_eq!(t.path, dir_str);
+
+        let t = make_launch_target(&file_str).unwrap();
+        assert!(!t.is_dir, "file target must not be a dir");
+        assert_eq!(t.path, file_str);
+        assert_eq!(t.dir, dir_str, "file target lists its parent folder");
+
+        assert!(make_launch_target("C:\\definitely\\missing.jpg").is_none());
     }
 }

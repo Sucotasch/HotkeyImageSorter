@@ -85,7 +85,12 @@ async function init() {
 
   renderShortcuts();
   setupEventListeners();
-  if (state.config.last_folder) {
+  // A path passed on the command line ("Open with…") takes priority over the
+  // remembered folder.
+  const launchTarget = await invoke('get_launch_target');
+  if (launchTarget) {
+    await openLaunchTarget(launchTarget);
+  } else if (state.config.last_folder) {
     state.folder = state.config.last_folder;
     await loadFiles(state.config.last_file);
   }
@@ -98,6 +103,11 @@ async function init() {
 }
 
 function setupEventListeners() {
+  // A second instance was launched with a file/folder ("Open with…" while the
+  // app is already running).
+  window.__TAURI__.event.listen('open-file', (event) => {
+    if (event.payload) openLaunchTarget(event.payload);
+  });
   el.btnSelectFolder.addEventListener('click', selectFolder);
   document.getElementById('btn-config-hotkeys').addEventListener('click', toggleSettings);
   document.getElementById('btn-close-settings').addEventListener('click', toggleSettings);
@@ -198,6 +208,21 @@ function updateSortButtonUI() {
   }
 }
 
+// Opens a folder, or the folder containing the given file with that file
+// selected ("Open with…" from Explorer passes the path on the command line).
+async function openLaunchTarget(target) {
+  state.folder = target.dir;
+  state.config.last_folder = target.dir;
+  state.config.last_file = target.is_dir ? null : target.path;
+  invoke('save_config', { config: state.config });
+  if (target.is_dir) {
+    el.imageList.scrollTop = 0;
+    await loadFiles();
+  } else {
+    await loadFiles(target.path);
+  }
+}
+
 // Actions
 async function selectFolder() {
   const selected = await open({
@@ -255,7 +280,13 @@ function sortAndRender(initialLoadPath = null) {
   el.fileCount.textContent = `${state.images.length} images`;
   
   if (initialLoadPath) {
-      const idx = state.images.findIndex(i => i.path === initialLoadPath);
+      let idx = state.images.findIndex(i => i.path === initialLoadPath);
+      // Windows paths are case-insensitive: fall back to a case-folded match
+      // (e.g. when the shell passed a differently-cased path).
+      if (idx === -1) {
+          const needle = initialLoadPath.toLowerCase();
+          idx = state.images.findIndex(i => i.path.toLowerCase() === needle);
+      }
       if (idx !== -1) {
           selectImage(idx);
           return;
