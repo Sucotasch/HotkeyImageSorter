@@ -20,6 +20,9 @@
             <option value="size">Size</option>
           </select>
           <button id="btn-sort-dir" title="Toggle Sort Direction">↑↓</button>
+          <select id="filter-type" class="filter-type" title="Filter by file type — Ctrl+A selects what's visible">
+            <option value="">All types</option>
+          </select>
           <button id="btn-refresh" title="Refresh list (keep position)">⟳</button>
         </div>
       </div>
@@ -54,8 +57,18 @@
         <div class="viewer-actions">
           <button id="btn-rotate" class="btn-action" title="Rotate 90° (Ctrl+R)">⟳ Rotate</button>
           <button id="btn-crop" class="btn-action" title="Toggle Crop (Ctrl+C)">✂ Crop</button>
+          <button id="btn-convert" class="btn-action" title="Convert PNG→JPG (Ctrl+J)">Convert</button>
+          <select id="convert-mode" class="convert-mode" title="Where the converted JPG is saved">
+            <option value="next">Next to source</option>
+            <option value="replace">Replace source</option>
+          </select>
           <button id="btn-undo" class="btn-action" title="Undo (Ctrl+Z)">↶ Undo (<span id="count-undo">0</span>)</button>
           <button id="btn-redo" class="btn-action" title="Redo (Ctrl+X)">↷ Redo (<span id="count-redo">0</span>)</button>
+        </div>
+        <div id="convert-progress" class="convert-progress hidden">
+          <div class="convert-progress-bar"><div id="convert-progress-fill" class="convert-progress-fill"></div></div>
+          <span id="convert-progress-text" class="convert-progress-text"></span>
+          <button id="btn-cancel-convert" class="btn-action" title="Cancel conversion">✕</button>
         </div>
         <div class="file-info">
           <span id="current-file-path" class="info-path" title="Double-click for fullscreen">No image selected</span>
@@ -88,6 +101,8 @@
           <kbd>Dbl-click</kbd> Rename File<br>
           <kbd>Ctrl+R</kbd> Rotate 90°<br>
           <kbd>Ctrl+C</kbd> Toggle Crop<br>
+          <kbd>Ctrl+J</kbd> Convert PNG→JPG<br>
+          <kbd>Ctrl+A</kbd> Select All (visible)<br>
           <kbd>Ctrl+Z</kbd> Undo / <kbd>Ctrl+X</kbd> Redo<br>
           <kbd>Enter</kbd> Fullscreen<br>
           <kbd>Ctrl+Q</kbd> Image Metadata<br>
@@ -122,6 +137,11 @@
         <label class="toggle-container">
           <span class="toggle-label">Minimize to tray on close</span>
           <input type="checkbox" id="toggle-tray">
+          <span class="slider round"></span>
+        </label>
+        <label class="toggle-container">
+          <span class="toggle-label">Convert PNG→JPG: replace source (moves PNG to Recycle Bin)</span>
+          <input type="checkbox" id="toggle-convert-replace">
           <span class="slider round"></span>
         </label>
       </div>

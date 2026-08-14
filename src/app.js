@@ -5,6 +5,8 @@ const { open } = window.__TAURI__.dialog;
 
 // State management
 let state = {
+  // Full listing from the backend (unfiltered); `images` is the filtered view.
+  allImages: [],
   images: [],
   currentIndex: -1,
   currentPath: '',
@@ -12,7 +14,10 @@ let state = {
   config: { hotkeys: {} },
   isCropActive: false,
   sort: { by: 'name', dir: 1 },
-  selectedPaths: new Set()
+  selectedPaths: new Set(),
+  // '' = all types; otherwise a lowercase extension like 'png'.
+  filterType: '',
+  isConverting: false
 };
 
 let currentZoom = 1;
@@ -34,6 +39,13 @@ const el = {
   btnSelectFolder: document.getElementById('btn-select-folder'),
   btnRotate: document.getElementById('btn-rotate'),
   btnCrop: document.getElementById('btn-crop'),
+  btnConvert: document.getElementById('btn-convert'),
+  filterType: document.getElementById('filter-type'),
+  convertMode: document.getElementById('convert-mode'),
+  convertProgress: document.getElementById('convert-progress'),
+  convertProgressFill: document.getElementById('convert-progress-fill'),
+  convertProgressText: document.getElementById('convert-progress-text'),
+  btnCancelConvert: document.getElementById('btn-cancel-convert'),
   shortcutLegend: document.getElementById('shortcut-legend'),
   cropOverlay: document.getElementById('crop-overlay'),
   cropRegion: document.getElementById('crop-region'),
@@ -98,6 +110,10 @@ async function init() {
   if (state.config.minimize_to_tray !== false) {
     document.getElementById('toggle-tray').checked = true;
   }
+  if (state.config.convert_replace === true) {
+    document.getElementById('toggle-convert-replace').checked = true;
+    el.convertMode.value = 'replace';
+  }
   
   updateHistoryStats();
 }
@@ -115,9 +131,48 @@ function setupEventListeners() {
   el.metaCorner.addEventListener('click', () => toggleMetadataModal());
   el.btnRotate.addEventListener('click', () => doRotate());
   el.btnCrop.addEventListener('click', () => toggleCrop());
+  el.btnConvert.addEventListener('click', () => doConvert());
   document.getElementById('btn-undo').addEventListener('click', () => doUndo());
   document.getElementById('btn-redo').addEventListener('click', () => doRedo());
   document.getElementById('btn-refresh').addEventListener('click', () => loadFiles(state.currentPath));
+
+  // Type filter (its options are rebuilt on every folder load)
+  el.filterType.addEventListener('change', (e) => {
+    state.filterType = e.target.value;
+    applyFilter();
+  });
+
+  // Cancel the running conversion; created JPGs stay on disk.
+  el.btnCancelConvert.addEventListener('click', () => {
+    invoke('cancel_convert');
+    el.btnCancelConvert.disabled = true;
+  });
+
+  // Conversion mode (Next to source / Replace source): the toolbar switch and
+  // the settings checkbox stay in sync — both write convert_replace.
+  el.convertMode.addEventListener('change', (e) => {
+    state.config.convert_replace = e.target.value === 'replace';
+    document.getElementById('toggle-convert-replace').checked = state.config.convert_replace;
+    invoke('save_config', { config: state.config });
+  });
+  document.getElementById('toggle-convert-replace').addEventListener('change', (e) => {
+    state.config.convert_replace = e.target.checked;
+    el.convertMode.value = state.config.convert_replace ? 'replace' : 'next';
+    invoke('save_config', { config: state.config });
+  });
+
+  // Live conversion progress (Rust emits one event per file). Rendered with
+  // a 50 ms throttle: at thousands of files the events arrive far faster than
+  // the screen can repaint, and every synchronous DOM write would otherwise
+  // add up.
+  let progressThrottle = null;
+  window.__TAURI__.event.listen('convert-progress', (event) => {
+    if (!event.payload) return;
+    const payload = event.payload;
+    if (progressThrottle) return; // last write still fresh
+    showConvertProgress(payload.done, payload.total, payload.current);
+    progressThrottle = setTimeout(() => { progressThrottle = null; }, 50);
+  });
   
   document.getElementById('toggle-tray').addEventListener('change', (e) => {
     state.config.minimize_to_tray = e.target.checked;
@@ -241,12 +296,14 @@ async function selectFolder() {
 
 async function loadFiles(initialLoadPath = null) {
   try {
-    state.images = await invoke('list_files', { dir: state.folder });
+    state.allImages = await invoke('list_files', { dir: state.folder });
     // The folder changed (or files were moved/edited): prompt badges from the
     // previous listing are stale, so rebuild the cache from scratch.
     promptPaths.clear();
     promptChecked.clear();
     lastListSignature = '';
+    rebuildFilterOptions();
+    state.images = filterImages();
     sortAndRender(initialLoadPath);
     // The current image may have disappeared (deleted/moved last file) — hide
     // the corner button so it never points at a stale selection.
@@ -257,6 +314,7 @@ async function loadFiles(initialLoadPath = null) {
       el.metadataBody.innerHTML = '<div class="metadata-noai">No images left.</div>';
     }
   } catch (err) {
+    state.allImages = [];
     state.images = [];
     promptPaths.clear();
     promptChecked.clear();
@@ -265,6 +323,40 @@ async function loadFiles(initialLoadPath = null) {
     updateMetaCorner();
     notify("Cannot load folder: " + err);
   }
+}
+
+// Rebuilds the type-filter dropdown from the extensions actually present in
+// the current folder. The list is already in memory, so this is a cheap pass
+// (no disk scanning) even for 20k-file folders.
+function rebuildFilterOptions() {
+  const types = new Set(state.allImages.map(i => i.extension.toLowerCase()));
+  const current = state.filterType;
+  el.filterType.innerHTML = '';
+  const all = document.createElement('option');
+  all.value = '';
+  all.textContent = 'All types';
+  el.filterType.appendChild(all);
+  [...types].sort().forEach(t => {
+    const opt = document.createElement('option');
+    opt.value = t;
+    opt.textContent = t.toUpperCase();
+    el.filterType.appendChild(opt);
+  });
+  // Drop a filter whose type no longer exists in this folder
+  if (current && !types.has(current)) state.filterType = '';
+  el.filterType.value = state.filterType;
+}
+
+// Applies state.filterType to state.allImages, producing the visible list.
+function filterImages() {
+  return state.filterType
+    ? state.allImages.filter(i => i.extension.toLowerCase() === state.filterType)
+    : state.allImages.slice();
+}
+
+function applyFilter() {
+  state.images = filterImages();
+  sortAndRender(state.currentPath);
 }
 
 let lastListSignature = '';
@@ -685,6 +777,17 @@ async function handleGlobalKeydown(e) {
   } else if (e.ctrlKey && (code === 'KeyQ' || key === 'q')) {
     e.preventDefault();
     await toggleMetadataModal();
+  } else if (e.ctrlKey && (code === 'KeyA' || key === 'a') && !anyModalOpen()) {
+    // Select all VISIBLE rows (the type filter narrows what "all" means:
+    // filter to PNG, then Ctrl+A selects exactly the PNGs).
+    e.preventDefault();
+    state.selectedPaths.clear();
+    state.images.forEach(i => state.selectedPaths.add(i.path));
+    applyRowClasses();
+    notify(state.selectedPaths.size + ' selected', false);
+  } else if (e.ctrlKey && (code === 'KeyJ' || key === 'j') && !anyModalOpen()) {
+    e.preventDefault();
+    await doConvert();
   } else if (e.ctrlKey && (code === 'KeyR' || key === 'r') && !anyModalOpen()) {
     await doRotate();
   } else if (e.ctrlKey && (code === 'KeyC' || key === 'c') && !anyModalOpen()) {
@@ -793,6 +896,91 @@ async function updateHistoryStats() {
     document.getElementById('count-undo').textContent = undoCount;
     document.getElementById('count-redo').textContent = redoCount;
   } catch(err) { console.warn("Failed to get history stats:", err); }
+}
+
+// --- PNG → JPG conversion ----------------------------------------------
+
+// The files to convert: every selected PNG, or the current file if it's a PNG.
+function convertTargets() {
+  let paths;
+  if (state.selectedPaths.size > 0) {
+    paths = Array.from(state.selectedPaths);
+  } else if (state.currentPath) {
+    paths = [state.currentPath];
+  } else {
+    return [];
+  }
+  return paths.filter(p => p.toLowerCase().endsWith('.png'));
+}
+
+function showConvertProgress(done, total, current) {
+  el.convertProgress.classList.remove('hidden');
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  el.convertProgressFill.style.width = pct + '%';
+  el.convertProgressText.textContent = current
+    ? `${done} / ${total} · ${current}`
+    : `${done} / ${total}`;
+}
+
+function hideConvertProgress() {
+  el.convertProgress.classList.add('hidden');
+  el.convertProgressFill.style.width = '0%';
+  el.convertProgressText.textContent = '';
+  el.btnCancelConvert.disabled = false;
+}
+
+function formatSizeMB(bytes) {
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+async function doConvert() {
+  if (state.isConverting) return;
+  const targets = convertTargets();
+  if (!targets.length) {
+    notify('No PNG files selected');
+    return;
+  }
+
+  const replace = state.config.convert_replace === true;
+  if (replace) {
+    // Native confirm before anything touches the originals.
+    const confirmed = await window.__TAURI__.dialog.confirm(
+      `Convert ${targets.length} PNG file(s) and move the originals to the Recycle Bin?`,
+      { title: 'Convert & replace', kind: 'warning' }
+    );
+    if (!confirmed) return;
+  }
+
+  state.isConverting = true;
+  showConvertProgress(0, targets.length, '');
+  try {
+    const report = await invoke('convert_pngs', { paths: targets, replace });
+    state.isConverting = false;
+    hideConvertProgress();
+
+    const parts = [`Converted ${report.converted.length} PNG → JPG`];
+    if (report.skipped_large && report.skipped_large.length) {
+      parts.push(`${report.skipped_large.length} skipped (metadata too large)`);
+    }
+    if (report.errors && report.errors.length) {
+      parts.push(`${report.errors.length} errors`);
+    }
+    const savedBytes = report.converted.reduce((s, c) => s + (c.in_size - c.out_size), 0);
+    if (savedBytes > 0) parts.push(`saved ${formatSizeMB(savedBytes)}`);
+    // Files neither converted nor skipped nor errored mean the run was
+    // cancelled before all files were processed.
+    const processed = report.converted.length
+      + (report.skipped_large ? report.skipped_large.length : 0)
+      + (report.errors ? report.errors.length : 0);
+    if (processed < targets.length) parts.push('canceled');
+    notify(parts.join(' · '), !!(report.errors && report.errors.length));
+    await loadFiles(state.currentPath);
+  } catch (err) {
+    state.isConverting = false;
+    hideConvertProgress();
+    notify('Convert failed: ' + err);
+    await loadFiles(state.currentPath);
+  }
 }
 
 function refreshCurrentImage() {
@@ -1022,8 +1210,12 @@ function renderShortcuts() {
 
 function toggleSettings() {
   el.modalSettings.classList.toggle('hidden');
-  if (!el.modalSettings.classList.contains('hidden')) renderSettingsList();
-  else {
+  if (!el.modalSettings.classList.contains('hidden')) {
+    renderSettingsList();
+    document.getElementById('toggle-tray').checked = state.config.minimize_to_tray !== false;
+    document.getElementById('toggle-convert-replace').checked = state.config.convert_replace === true;
+    el.convertMode.value = state.config.convert_replace ? 'replace' : 'next';
+  } else {
     renderShortcuts();
     invoke('save_config', { config: state.config });
   }

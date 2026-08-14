@@ -285,6 +285,71 @@ body, html {
   color: var(--accent-color);
 }
 
+/* Compact type filter inside the sort-controls row */
+.filter-type {
+  padding: 4px 4px;
+  max-width: 110px;
+  background: #2a2a3e;
+  color: var(--text-primary, #eee);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* Conversion mode switch next to the Convert button */
+.convert-mode {
+  padding: 4px 4px;
+  max-width: 130px;
+  background: #2a2a3e;
+  color: var(--text-primary, #eee);
+  border: 1px solid var(--accent-color);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* Conversion progress (viewer footer) */
+.convert-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+}
+
+.convert-progress.hidden {
+  display: none;
+}
+
+.convert-progress-bar {
+  flex: 1;
+  min-width: 60px;
+  height: 6px;
+  background: #2a2a3e;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.convert-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent-color);
+  transition: width 0.15s;
+}
+
+.convert-progress-text {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.convert-progress .btn-action {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
 /* Buttons and Controls */
 .btn-primary {
   width: 100%;

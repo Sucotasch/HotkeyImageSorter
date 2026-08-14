@@ -1,5 +1,6 @@
 mod backup;
 mod config;
+mod exif_writer;
 mod file_ops;
 mod image_proc;
 mod jpeg_meta;
@@ -8,7 +9,8 @@ mod models;
 mod png_meta;
 
 use crate::models::{AppConfig, ImageInfo, UndoAction, UndoActionType};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Emitter;
@@ -21,6 +23,263 @@ const MAX_HISTORY: usize = 10;
 struct AppState {
     history: Mutex<Vec<Vec<UndoAction>>>,
     redo_history: Mutex<Vec<Vec<UndoAction>>>,
+}
+
+/// Shared state for the PNG→JPG conversion: a cancellation flag (set by the
+/// frontend's Cancel button) and a busy flag (guards against two concurrent
+/// conversions).
+struct ConvertState {
+    cancel: Arc<AtomicBool>,
+    busy: Arc<AtomicBool>,
+}
+
+/// One converted file's entry in the final report.
+#[derive(Clone, Default, serde::Serialize)]
+struct ConvertItem {
+    /// Original PNG path.
+    source: String,
+    /// Created JPG path.
+    output: String,
+    in_size: u64,
+    out_size: u64,
+    /// `true` when the source PNG was moved to the trash (replace mode).
+    replaced: bool,
+}
+
+/// Progress event streamed to the frontend after every file.
+#[derive(Clone, serde::Serialize)]
+struct ConvertProgress {
+    done: usize,
+    total: usize,
+    /// File name currently being converted (for the live readout).
+    current: String,
+}
+
+/// Final conversion report returned to the frontend.
+#[derive(Clone, Default, serde::Serialize)]
+struct ConvertReport {
+    converted: Vec<ConvertItem>,
+    /// Files skipped because prompt+workflow exceed the JPEG EXIF limit.
+    skipped_large: Vec<String>,
+    errors: Vec<String>,
+}
+
+/// The result of converting a single file (no I/O to trash yet).
+#[derive(Debug)]
+enum FileOutcome {
+    Converted {
+        source: String,
+        output: String,
+        in_size: u64,
+        out_size: u64,
+    },
+    /// Metadata does not fit the JPEG EXIF limit — nothing was written.
+    TooLarge {
+        source: String,
+    },
+    /// Not a .png file (caller usually filters already; safety net).
+    Skipped,
+    Error {
+        source: String,
+        error: String,
+    },
+}
+
+/// Converts one PNG file to JPG next to it (auto-renamed on collision) and,
+/// in replace mode, hands the original to `dispose` (the real worker uses the
+/// OS trash; tests inject a stub). Returns the outcome without touching the
+/// shared report so this stays a pure, unit-testable function.
+fn convert_one(
+    src: &str,
+    replace: bool,
+    dispose: impl Fn(&str) -> Result<(), String>,
+) -> FileOutcome {
+    let is_png = std::path::Path::new(src)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("png"))
+        .unwrap_or(false);
+    if !is_png {
+        return FileOutcome::Skipped;
+    }
+
+    let path = std::path::Path::new(src);
+    let Some(dir) = path.parent() else {
+        return FileOutcome::Error {
+            source: src.to_string(),
+            error: "no parent directory".to_string(),
+        };
+    };
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+    let Some(stem) = stem else {
+        return FileOutcome::Error {
+            source: src.to_string(),
+            error: "invalid file name".to_string(),
+        };
+    };
+
+    let dst = match file_ops::available_path(&dir.to_string_lossy(), &stem, "jpg") {
+        Ok(p) => p,
+        Err(e) => {
+            return FileOutcome::Error {
+                source: src.to_string(),
+                error: e,
+            }
+        }
+    };
+    let dst_str = dst.to_string_lossy().into_owned();
+
+    match image_proc::png_to_jpg(src, &dst_str, 90) {
+        Ok(image_proc::PngToJpgOutcome::Converted {
+            in_size, out_size, ..
+        }) => {
+            if replace {
+                if let Err(e) = dispose(src) {
+                    return FileOutcome::Error {
+                        source: src.to_string(),
+                        error: format!("converted to {dst_str} but failed to trash original: {e}"),
+                    };
+                }
+            }
+            FileOutcome::Converted {
+                source: src.to_string(),
+                output: dst_str,
+                in_size,
+                out_size,
+            }
+        }
+        Ok(image_proc::PngToJpgOutcome::TooLarge) => FileOutcome::TooLarge {
+            source: src.to_string(),
+        },
+        Err(e) => FileOutcome::Error {
+            source: src.to_string(),
+            error: e,
+        },
+    }
+}
+
+/// Runs the parallel conversion over `paths`. Workers pull file indices from a
+/// shared counter, check the cancellation flag between files, and emit a
+/// `convert-progress` event per file. Returns the accumulated report.
+fn run_conversion(
+    paths: Vec<String>,
+    replace: bool,
+    cancel: Arc<AtomicBool>,
+    emit: impl Fn(ConvertProgress) + Send + Sync + 'static,
+) -> ConvertReport {
+    let total = paths.len();
+    if total == 0 {
+        return ConvertReport::default();
+    }
+
+    let next = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicUsize::new(0));
+    let report = Arc::new(Mutex::new(ConvertReport::default()));
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 8);
+    let emit = Arc::new(emit);
+    let mut handles = Vec::new();
+    for _ in 0..workers {
+        let next = next.clone();
+        let done = done.clone();
+        let report = report.clone();
+        let cancel = cancel.clone();
+        let emit = emit.clone();
+        let paths = paths.clone();
+        handles.push(std::thread::spawn(move || loop {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            let i = next.fetch_add(1, Ordering::SeqCst);
+            if i >= total {
+                break;
+            }
+            let path = &paths[i];
+            let outcome = convert_one(path, replace, |p| {
+                trash::delete(p).map_err(|e| e.to_string())
+            });
+            {
+                let mut rep = report.lock().unwrap();
+                match outcome {
+                    FileOutcome::Converted {
+                        source,
+                        output,
+                        in_size,
+                        out_size,
+                    } => rep.converted.push(ConvertItem {
+                        source,
+                        output,
+                        in_size,
+                        out_size,
+                        replaced: replace,
+                    }),
+                    FileOutcome::TooLarge { source } => rep.skipped_large.push(source),
+                    FileOutcome::Skipped => {}
+                    FileOutcome::Error { source, error } => {
+                        rep.errors.push(format!("{source}: {error}"))
+                    }
+                }
+            }
+            let d = done.fetch_add(1, Ordering::SeqCst) + 1;
+            let current = std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            emit(ConvertProgress {
+                done: d,
+                total,
+                current,
+            });
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+
+    let rep = report.lock().unwrap().clone();
+    // Cancellation is not an error: the partial report is what the frontend
+    // needs to show "canceled after N files".
+    rep
+}
+
+#[tauri::command]
+async fn convert_pngs(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+    replace: bool,
+    state: State<'_, ConvertState>,
+) -> Result<ConvertReport, String> {
+    if state.busy.swap(true, Ordering::SeqCst) {
+        return Err("A conversion is already running".to_string());
+    }
+    state.cancel.store(false, Ordering::SeqCst);
+    let cancel = state.cancel.clone();
+    let busy = state.busy.clone();
+    let app_handle = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let report = run_conversion(paths, replace, cancel, {
+            let app = app_handle.clone();
+            move |p| {
+                let _ = app.emit("convert-progress", p);
+            }
+        });
+        busy.store(false, Ordering::SeqCst);
+        report
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+/// Asks the running conversion to stop after the current file. Already-created
+/// JPGs stay on disk; the report shows what finished before the cancel.
+#[tauri::command]
+async fn cancel_convert(state: State<'_, ConvertState>) -> Result<(), String> {
+    state.cancel.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 /// The path the app was launched with (e.g. Windows "Open with…"), handed to
@@ -490,6 +749,10 @@ pub fn run() {
             history: Mutex::new(Vec::new()),
             redo_history: Mutex::new(Vec::new()),
         })
+        .manage(ConvertState {
+            cancel: Arc::new(AtomicBool::new(false)),
+            busy: Arc::new(AtomicBool::new(false)),
+        })
         .invoke_handler(tauri::generate_handler![
             list_files,
             move_images,
@@ -506,7 +769,9 @@ pub fn run() {
             get_metadata,
             copy_text,
             check_prompts,
-            get_launch_target
+            get_launch_target,
+            convert_pngs,
+            cancel_convert
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -633,6 +898,164 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "original");
         assert!(redo.is_empty(), "redo must drain redo");
         assert_eq!(history.len(), 1, "redo must restore history");
+    }
+
+    /// Builds a tiny PNG with the given text chunks (ComfyUI prompt/workflow).
+    fn synth_png(dir: &std::path::Path, name: &str, chunks: &[(&str, &str)]) -> std::path::PathBuf {
+        use png::{BitDepth, ColorType};
+        let path = dir.join(name);
+        let mut bytes = Vec::new();
+        {
+            let w = &mut std::io::Cursor::new(&mut bytes);
+            let mut enc = png::Encoder::new(w, 4, 4);
+            enc.set_color(ColorType::Rgba);
+            enc.set_depth(BitDepth::Eight);
+            let mut writer = enc.write_header().unwrap();
+            writer.write_image_data(&[0u8; 4 * 4 * 4]).unwrap();
+            for (kw, text) in chunks {
+                writer
+                    .write_text_chunk(&png::text_metadata::TEXtChunk::new(
+                        kw.to_string(),
+                        text.to_string(),
+                    ))
+                    .unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn convert_one_creates_jpg_next_to_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = synth_png(
+            dir.path(),
+            "comfy.png",
+            &[("prompt", "{\"a\":1}"), ("workflow", "{\"nodes\":[]}")],
+        );
+        let outcome = convert_one(src.to_str().unwrap(), false, |_| {
+            Err("must not trash".to_string())
+        });
+        match outcome {
+            FileOutcome::Converted {
+                output, in_size, ..
+            } => {
+                assert!(std::path::Path::new(&output).exists());
+                assert!(in_size > 0);
+                // JPG next to the PNG, same stem
+                assert_eq!(
+                    std::path::Path::new(&output)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy(),
+                    "comfy.jpg"
+                );
+                // source untouched in next-to mode
+                assert!(src.exists());
+            }
+            other => panic!("expected Converted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convert_one_replace_trashes_source_after_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = synth_png(dir.path(), "comfy.png", &[("prompt", "{\"a\":1}")]);
+        let trashed = std::sync::Mutex::new(Vec::new());
+        let outcome = convert_one(src.to_str().unwrap(), true, |p| {
+            trashed.lock().unwrap().push(p.to_string());
+            Ok(())
+        });
+        assert!(matches!(outcome, FileOutcome::Converted { .. }));
+        let trashed = trashed.lock().unwrap();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0], src.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn convert_one_skips_non_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("pic.jpg");
+        std::fs::write(&src, b"jpeg").unwrap();
+        let outcome = convert_one(src.to_str().unwrap(), false, |_| Err(String::new()));
+        assert!(matches!(outcome, FileOutcome::Skipped));
+    }
+
+    #[test]
+    fn convert_one_reports_too_large_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = synth_png(
+            dir.path(),
+            "big.png",
+            &[
+                ("prompt", &"p".repeat(50_000)),
+                ("workflow", &"w".repeat(50_000)),
+            ],
+        );
+        let outcome = convert_one(src.to_str().unwrap(), false, |_| Err(String::new()));
+        assert!(matches!(outcome, FileOutcome::TooLarge { .. }));
+        // no JPG left behind
+        assert!(!dir.path().join("big.jpg").exists());
+    }
+
+    #[test]
+    fn run_conversion_aggregates_report_and_auto_renames() {
+        let dir = tempfile::tempdir().unwrap();
+        synth_png(dir.path(), "a.png", &[("prompt", "{\"a\":1}")]);
+        synth_png(dir.path(), "b.png", &[("workflow", "{}")]);
+        // Collision: a.jpg already exists -> a (1).jpg
+        std::fs::write(dir.path().join("a.jpg"), b"existing").unwrap();
+        // Non-png is skipped silently
+        std::fs::write(dir.path().join("note.txt"), b"x").unwrap();
+
+        let paths: Vec<String> = vec!["a.png", "b.png", "note.txt"]
+            .into_iter()
+            .map(|n| dir.path().join(n).to_string_lossy().into_owned())
+            .collect();
+        let report = run_conversion(paths, false, Arc::new(AtomicBool::new(false)), |_| {});
+
+        assert_eq!(report.converted.len(), 2);
+        assert!(report.errors.is_empty());
+        assert!(report.skipped_large.is_empty());
+        let names: Vec<String> = report
+            .converted
+            .iter()
+            .map(|c| {
+                std::path::Path::new(&c.output)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(names.contains(&"a (1).jpg".to_string()), "got {names:?}");
+        assert!(names.contains(&"b.jpg".to_string()), "got {names:?}");
+        // Originals untouched in next-to mode
+        assert!(dir.path().join("a.png").exists());
+        assert!(dir.path().join("b.png").exists());
+    }
+
+    #[test]
+    fn run_conversion_respects_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..20 {
+            synth_png(dir.path(), &format!("f{i:02}.png"), &[("prompt", "{}")]);
+        }
+        let paths: Vec<String> = (0..20)
+            .map(|i| {
+                dir.path()
+                    .join(format!("f{i:02}.png"))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let cancel = Arc::new(AtomicBool::new(true)); // pre-canceled
+        let report = run_conversion(paths, false, cancel, |_| {});
+        assert!(
+            report.converted.is_empty(),
+            "canceled run must convert nothing"
+        );
     }
 
     #[test]

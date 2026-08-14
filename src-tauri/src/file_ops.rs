@@ -171,6 +171,26 @@ pub fn rename_file(source: &str, new_name: &str) -> Result<String, String> {
     Ok(target.to_string_lossy().to_string())
 }
 
+/// Returns a path in `dir` with the given stem/ext that does not exist yet,
+/// appending Explorer-style " (1)", " (2)"… suffixes on collision. If `dir`
+/// does not exist it is created first (like move_image does).
+pub fn available_path(dir: &str, stem: &str, ext: &str) -> Result<std::path::PathBuf, String> {
+    let dir_path = Path::new(dir);
+    if !dir_path.exists() {
+        std::fs::create_dir_all(dir_path).map_err(|e| e.to_string())?;
+    }
+    if !dir_path.is_dir() {
+        return Err(format!("Target is not a directory: {dir}"));
+    }
+    let mut target = dir_path.join(format!("{stem}.{ext}"));
+    let mut count = 1;
+    while target.exists() {
+        target = dir_path.join(format!("{stem} ({count}).{ext}"));
+        count += 1;
+    }
+    Ok(target)
+}
+
 pub fn move_image(source: &str, target_dir: &str) -> Result<String, String> {
     let source_path = Path::new(source);
     let target_dir_path = Path::new(target_dir);
@@ -425,6 +445,27 @@ mod tests {
             !dir.path().join("pic_1.jpg").exists(),
             "must not auto-rename the file next to itself"
         );
+    }
+
+    #[test]
+    fn available_path_renames_on_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("foo.jpg"), b"1").unwrap();
+        fs::write(dir.path().join("foo (1).jpg"), b"2").unwrap();
+
+        let p1 = available_path(dir.path().to_str().unwrap(), "foo", "jpg").unwrap();
+        assert_eq!(p1.file_name().unwrap().to_string_lossy(), "foo (2).jpg");
+        let p2 = available_path(dir.path().to_str().unwrap(), "bar", "jpg").unwrap();
+        assert_eq!(p2.file_name().unwrap().to_string_lossy(), "bar.jpg");
+    }
+
+    #[test]
+    fn available_path_creates_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("deep/nested");
+        let p = available_path(sub.to_str().unwrap(), "foo", "png").unwrap();
+        assert!(p.parent().unwrap().exists());
+        assert!(!p.exists());
     }
 
     #[test]

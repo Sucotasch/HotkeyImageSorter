@@ -37,6 +37,7 @@ fn default_config() -> AppConfig {
         sort_by: Some("name".to_string()),
         sort_dir: Some(1),
         minimize_to_tray: Some(true),
+        convert_replace: Some(false),
     }
 }
 
@@ -83,6 +84,7 @@ mod tests {
         cfg.sort_by = Some("size".to_string());
         cfg.sort_dir = Some(-1);
         cfg.minimize_to_tray = Some(false);
+        cfg.convert_replace = Some(true);
         cfg.last_folder = Some("C:/images".to_string());
 
         save_config_to(&path, &cfg).unwrap();
@@ -92,6 +94,7 @@ mod tests {
         assert_eq!(loaded.sort_by, cfg.sort_by);
         assert_eq!(loaded.sort_dir, cfg.sort_dir);
         assert_eq!(loaded.minimize_to_tray, cfg.minimize_to_tray);
+        assert_eq!(loaded.convert_replace, cfg.convert_replace);
         assert_eq!(loaded.last_folder, cfg.last_folder);
     }
 

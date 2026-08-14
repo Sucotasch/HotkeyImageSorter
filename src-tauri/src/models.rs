@@ -23,6 +23,10 @@ pub struct AppConfig {
     pub sort_dir: Option<i32>,
     #[serde(default)]
     pub minimize_to_tray: Option<bool>,
+    /// PNG→JPG conversion mode: `true` replaces the source PNG (moves it to
+    /// the trash), `false` (default) writes the JPG next to it.
+    #[serde(default)]
+    pub convert_replace: Option<bool>,
 }
 
 /// A single metadata key/value pair (EXIF field, PNG text chunk, ...).
