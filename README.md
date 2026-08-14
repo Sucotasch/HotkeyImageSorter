@@ -47,8 +47,11 @@
 | **Persistent Config** | Settings saved between sessions (folders, hotkeys, preferences) |
 | **AI Metadata** | Ctrl+Q viewer: EXIF, PNG text chunks (A1111/ComfyUI/InvokeAI prompts & workflows), copy to clipboard |
 | **Prompt Badges** | Lazy ✦ badge on files that carry AI-generation metadata |
+| **Metadata Export** | Export metadata next to the image as `.metadata.json` / `.metadata.txt` from the Ctrl+Q modal |
 | **Lossless JPEG** | 90/180/270° rotation without re-encoding (libjpeg-turbo) |
 | **Metadata-safe edits** | Rotate/crop preserve EXIF, ICC, XMP, comments and PNG prompt chunks |
+| **PNG→JPG Conversion** | Convert selected PNGs to JPG (Ctrl+J) preserving AI prompt/workflow metadata; next-to-source or replace mode; detailed conversion report |
+| **Explorer Context Menu** | Optional per-user context menu (no admin rights): "HK Image Sorter" cascading menu with "Open in HK Image Sorter" / "Show Metadata Info" for images, and "Open in HK Image Sorter" for folders & folder background |
 | **Virtualized List** | Windowed rendering — smooth on folders with thousands of files |
 
 ### Supported Image Formats
@@ -353,7 +356,8 @@ Moves image to system trash (configurable in settings).
 |----------|--------|
 | `Ctrl+R` | Rotate 90° clockwise (lossless for JPEG) |
 | `Ctrl+C` | Toggle crop mode |
-| `Ctrl+Q` | Image metadata viewer (EXIF / AI prompt / copy) |
+| `Ctrl+Q` | Image metadata viewer (EXIF / AI prompt / copy / export) |
+| `Ctrl+J` | Convert selected PNGs to JPG (with metadata) |
 | `Mouse Wheel` | Zoom in/out |
 | `Ctrl+0` | Reset zoom |
 
@@ -411,6 +415,9 @@ All file operations are executed through Tauri commands:
 | `redo_last_move` | `{}` | `restoredPath` (empty if nothing to redo) |
 | `save_config` | `{ config }` | `void` |
 | `get_history_stats` | `{}` | `[undoCount, redoCount]` (action counts) |
+| `convert_images` | `{ paths, replaceSource }` | `ConversionReport` (created / skipped / errors) |
+| `export_metadata` | `{ path, format }` | written file path (json \| txt) |
+| `set_context_menu` | `{ enabled }` | `void` (registers/removes HKCU entries) |
 
 ### Performance Considerations
 
@@ -438,6 +445,8 @@ HotkeyImageSorter/
 │   │   ├── lib.rs         # Command exports
 │   │   ├── file_ops.rs    # File operations
 │   │   ├── image_proc.rs  # Image processing
+│   │   ├── metadata.rs    # AI prompt/workflow extraction (PNG/JPEG/XMP/EXIF)
+│   │   ├── context_menu.rs# Explorer context menu (HKCU registry)
 │   │   ├── config.rs      # Configuration
 │   │   └── models.rs      # Data models
 │   ├── Cargo.toml         # Rust dependencies
@@ -613,10 +622,13 @@ Contributions are welcome! Please read our contributing guidelines before submit
 | **Редактирование изображений** | Поворот (90°), обрезка и масштабирование |
 | **Умная сортировка** | Сортировка по имени, дате или размеру с порядком возрастания/убывания |
 | **Сохранение конфигурации** | Настройки сохраняются между сеансами (папки, горячие клавиши, предпочтения) |
-| **AI-метаданные** | Просмотр Ctrl+I: EXIF, PNG-чанки (промпты/workflow A1111/ComfyUI/InvokeAI), копирование в буфер |
+| **AI-метаданные** | Просмотр Ctrl+Q: EXIF, PNG-чанки (промпты/workflow A1111/ComfyUI/InvokeAI), копирование в буфер |
 | **Значки промптов** | Ленивый ✦ у файлов с AI-метаданными генерации |
+| **Экспорт метаданных** | Экспорт метаданных рядом с изображением как `.metadata.json` / `.metadata.txt` из модалки Ctrl+Q |
 | **Lossless JPEG** | Поворот 90/180/270° без перекодирования (libjpeg-turbo) |
 | **Сохранение метаданных** | Поворот/обрезка сохраняют EXIF, ICC, XMP, комментарии и PNG-чанки промптов |
+| **Конвертация PNG→JPG** | Конвертация выбранных PNG в JPG (Ctrl+J) с сохранением AI-метаданных; режимы «рядом с исходным» / «заменить исходный»; подробный отчёт о конвертации |
+| **Контекстное меню проводника** | Опционально (без прав администратора): каскадное меню «HK Image Sorter» с пунктами «Открыть в HK Image Sorter» / «Показать метаданные» для изображений и «Открыть в HK Image Sorter» для папок и фона папки |
 | **Виртуализированный список** | Оконный рендеринг — плавно на папках с тысячами файлов |
 
 ### Поддерживаемые форматы изображений
@@ -922,7 +934,8 @@ Delete
 |-----------------|----------|
 | `Ctrl+R` | Поворот на 90° по часовой стрелке (lossless для JPEG) |
 | `Ctrl+C` | Переключить режим обрезки |
-| `Ctrl+I` | Просмотр метаданных (EXIF / AI-промпт / копирование) |
+| `Ctrl+Q` | Просмотр метаданных (EXIF / AI-промпт / копирование / экспорт) |
+| `Ctrl+J` | Конвертация выбранных PNG в JPG (с метаданными) |
 | `Колесо мыши` | Масштабирование |
 | `Ctrl+0` | Сброс масштаба |
 
@@ -980,6 +993,9 @@ const state = {
 | `redo_last_move` | `{}` | `restoredPath` (empty if nothing to redo) |
 | `save_config` | `{ config }` | `void` |
 | `get_history_stats` | `{}` | `[undoCount, redoCount]` (action counts) |
+| `convert_images` | `{ paths, replaceSource }` | `ConversionReport` (created / skipped / errors) |
+| `export_metadata` | `{ path, format }` | written file path (json \| txt) |
+| `set_context_menu` | `{ enabled }` | `void` (registers/removes HKCU entries) |
 
 ### Производительность
 
@@ -1007,6 +1023,8 @@ HotkeyImageSorter/
 │   │   ├── lib.rs         # Экспорт команд
 │   │   ├── file_ops.rs    # Операции с файлами
 │   │   ├── image_proc.rs  # Обработка изображений
+│   │   ├── metadata.rs    # Извлечение AI-промптов/workflow (PNG/JPEG/XMP/EXIF)
+│   │   ├── context_menu.rs# Контекстное меню проводника (реестр HKCU)
 │   │   ├── config.rs      # Конфигурация
 │   │   └── models.rs      # Модели данных
 │   ├── Cargo.toml         # Rust зависимости

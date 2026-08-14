@@ -121,6 +121,9 @@ async function init() {
   if (state.config.convert_show_report !== false) {
     document.getElementById('toggle-convert-report').checked = true;
   }
+  if (state.config.context_menu === true) {
+    document.getElementById('toggle-context-menu').checked = true;
+  }
   
   updateHistoryStats();
 }
@@ -170,6 +173,20 @@ function setupEventListeners() {
   document.getElementById('toggle-convert-report').addEventListener('change', (e) => {
     state.config.convert_show_report = e.target.checked;
     invoke('save_config', { config: state.config });
+  });
+  // Explorer context-menu registration (HKCU — no admin needed). Reverting
+  // the toggle on failure keeps the UI truthful about what's registered.
+  document.getElementById('toggle-context-menu').addEventListener('change', async (e) => {
+    const want = e.target.checked;
+    try {
+      await invoke('set_context_menu', { enabled: want });
+      state.config.context_menu = want;
+      await invoke('save_config', { config: state.config });
+      notify(want ? 'Context menu items added' : 'Context menu items removed', false);
+    } catch (err) {
+      e.target.checked = !want;
+      notify('Context menu: ' + err);
+    }
   });
   document.getElementById('btn-close-report').addEventListener('click', () => closeReportModal());
 
@@ -287,6 +304,10 @@ async function openLaunchTarget(target) {
     await loadFiles();
   } else {
     await loadFiles(target.path);
+    // "Show Metadata Info" context-menu item: open the modal right away.
+    if (target.action === 'metadata') {
+      await toggleMetadataModal();
+    }
   }
 }
 
@@ -1318,6 +1339,7 @@ function toggleSettings() {
     document.getElementById('toggle-tray').checked = state.config.minimize_to_tray !== false;
     document.getElementById('toggle-convert-replace').checked = state.config.convert_replace === true;
     document.getElementById('toggle-convert-report').checked = state.config.convert_show_report !== false;
+    document.getElementById('toggle-context-menu').checked = state.config.context_menu === true;
     el.convertMode.value = state.config.convert_replace ? 'replace' : 'next';
   } else {
     renderShortcuts();
@@ -1383,6 +1405,10 @@ function renderMetadata(meta) {
         <tr><td>Size</td><td>${formatBytes(meta.size)}</td></tr>
         <tr><td>Modified</td><td>${escapeHtml(date)}</td></tr>
       </table>
+      <div class="meta-copy-btns">
+        <button class="btn-secondary" data-export="json">Export JSON</button>
+        <button class="btn-secondary" data-export="txt">Export TXT</button>
+      </div>
     </div>`);
 
   // AI prompt (if present) with copy actions
@@ -1446,6 +1472,21 @@ function renderMetadata(meta) {
         notify('Copied to clipboard', false);
       } catch (err) {
         notify('Copy failed: ' + err);
+      }
+    });
+  });
+
+  // Export buttons: write .metadata.json / .metadata.txt next to the image.
+  el.metadataBody.querySelectorAll('[data-export]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        const outPath = await invoke('export_metadata', {
+          path: state.currentPath,
+          format: btn.dataset.export
+        });
+        notify('Exported: ' + basename(outPath), false);
+      } catch (err) {
+        notify('Export failed: ' + err);
       }
     });
   });

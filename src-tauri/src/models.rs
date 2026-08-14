@@ -31,6 +31,11 @@ pub struct AppConfig {
     /// (instead of only a short toast). Default: on.
     #[serde(default)]
     pub convert_show_report: Option<bool>,
+    /// Whether the Explorer context-menu items (Open in HK Image Sorter,
+    /// Show Metadata Info, Open containing folder) are registered in the
+    /// registry. Default: off.
+    #[serde(default)]
+    pub context_menu: Option<bool>,
 }
 
 /// A single metadata key/value pair (EXIF field, PNG text chunk, ...).

@@ -79,6 +79,57 @@ pub fn get_metadata(path: &str) -> Result<ImageMetadata, String> {
     })
 }
 
+/// Renders the metadata as a readable text dump for the `.metadata.txt`
+/// export. Mirrors the modal layout: file summary, AI prompt, chunks,
+/// comments, EXIF.
+pub fn to_text(meta: &ImageMetadata) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("File: {}\n", meta.name));
+    out.push_str(&format!("Path: {}\n", meta.path));
+    out.push_str(&format!("Format: {}\n", meta.format));
+    out.push_str(&format!("Size: {} bytes\n\n", meta.size));
+
+    if let Some(ai) = &meta.ai {
+        out.push_str(&format!("AI generation ({})\n", ai.source));
+        if !ai.prompt.is_empty() {
+            out.push_str(&format!("\nPrompt:\n{}\n", ai.prompt));
+        }
+        if let Some(neg) = &ai.negative_prompt {
+            if !neg.is_empty() {
+                out.push_str(&format!("\nNegative prompt:\n{neg}\n"));
+            }
+        }
+        if !ai.params.is_empty() {
+            out.push_str(&format!("\nParameters:\n{}\n", ai.params));
+        }
+        out.push_str(&format!("\nRaw:\n{}\n\n", ai.raw));
+    } else {
+        out.push_str("No AI generation prompt detected.\n\n");
+    }
+
+    if !meta.text_chunks.is_empty() {
+        out.push_str("PNG text chunks:\n");
+        for c in &meta.text_chunks {
+            out.push_str(&format!("  {}: {}\n", c.key, c.value));
+        }
+        out.push('\n');
+    }
+    if !meta.comments.is_empty() {
+        out.push_str("JPEG comments:\n");
+        for c in &meta.comments {
+            out.push_str(&format!("  {c}\n"));
+        }
+        out.push('\n');
+    }
+    if !meta.exif.is_empty() {
+        out.push_str("EXIF:\n");
+        for c in &meta.exif {
+            out.push_str(&format!("  {}: {}\n", c.key, c.value));
+        }
+    }
+    out
+}
+
 /// Human-readable file extension for the given image format.
 fn format_extension(f: &image::ImageFormat) -> String {
     let exts = f.extensions_str();

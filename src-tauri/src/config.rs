@@ -39,6 +39,7 @@ fn default_config() -> AppConfig {
         minimize_to_tray: Some(true),
         convert_replace: Some(false),
         convert_show_report: Some(true),
+        context_menu: Some(false),
     }
 }
 
@@ -86,6 +87,8 @@ mod tests {
         cfg.sort_dir = Some(-1);
         cfg.minimize_to_tray = Some(false);
         cfg.convert_replace = Some(true);
+        cfg.convert_show_report = Some(false);
+        cfg.context_menu = Some(true);
         cfg.last_folder = Some("C:/images".to_string());
 
         save_config_to(&path, &cfg).unwrap();
@@ -96,6 +99,8 @@ mod tests {
         assert_eq!(loaded.sort_dir, cfg.sort_dir);
         assert_eq!(loaded.minimize_to_tray, cfg.minimize_to_tray);
         assert_eq!(loaded.convert_replace, cfg.convert_replace);
+        assert_eq!(loaded.convert_show_report, cfg.convert_show_report);
+        assert_eq!(loaded.context_menu, cfg.context_menu);
         assert_eq!(loaded.last_folder, cfg.last_folder);
     }
 

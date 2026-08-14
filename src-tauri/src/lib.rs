@@ -1,5 +1,6 @@
 mod backup;
 mod config;
+mod context_menu;
 mod exif_writer;
 mod file_ops;
 mod image_proc;
@@ -282,10 +283,51 @@ async fn cancel_convert(state: State<'_, ConvertState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Installs or removes the Explorer context-menu items. Called from the
+/// Options toggle; the config flag is saved separately by save_config.
+#[tauri::command]
+async fn set_context_menu(enabled: bool) -> Result<(), String> {
+    if enabled {
+        context_menu::install()
+    } else {
+        context_menu::uninstall()
+    }
+}
+
+/// Exports the full metadata of an image to a sidecar file next to it:
+/// `<name>.metadata.json` or `<name>.metadata.txt`. Used by the Ctrl+Q modal
+/// "Export" buttons.
+#[tauri::command]
+async fn export_metadata(path: String, format: String) -> Result<String, String> {
+    let meta = metadata::get_metadata(&path)?;
+    let src = std::path::Path::new(&path);
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".to_string());
+    let dir = src
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".to_string());
+
+    let (out_path, content) = if format.eq_ignore_ascii_case("txt") {
+        (format!("{dir}/{stem}.metadata.txt"), metadata::to_text(&meta))
+    } else {
+        let json = serde_json::to_string_pretty(&meta).map_err(|e| e.to_string())?;
+        (format!("{dir}/{stem}.metadata.json"), json)
+    };
+    std::fs::write(&out_path, content).map_err(|e| e.to_string())?;
+    Ok(out_path)
+}
+
 /// The path the app was launched with (e.g. Windows "Open with…"), handed to
 /// the frontend at startup and replaced on subsequent single-instance
-/// launches.
-struct LaunchArgs(Mutex<Option<String>>);
+/// launches. `metadata` is true when launched via the "Show Metadata Info"
+/// context-menu item, so the frontend opens the Ctrl+Q modal right away.
+struct LaunchArgs {
+    path: Mutex<Option<String>>,
+    metadata: bool,
+}
 
 /// A launch target for the frontend: a folder to list, or a file to show (its
 /// parent folder is listed and the file is selected).
@@ -294,9 +336,12 @@ struct LaunchTarget {
     path: String,
     is_dir: bool,
     dir: String,
+    /// "open" shows the file; "metadata" additionally opens the Ctrl+Q modal
+    /// (used by the "Show Metadata Info" context-menu item).
+    action: String,
 }
 
-fn make_launch_target(path: &str) -> Option<LaunchTarget> {
+fn make_launch_target_with_action(path: &str, action: &str) -> Option<LaunchTarget> {
     // Normalise relative paths (e.g. `pic.jpg`) to absolute so a file's
     // parent is never the empty path.
     let p = std::path::absolute(path).ok()?;
@@ -305,6 +350,7 @@ fn make_launch_target(path: &str) -> Option<LaunchTarget> {
             path: path.to_string(),
             is_dir: true,
             dir: path.to_string(),
+            action: action.to_string(),
         })
     } else if p.is_file() {
         let dir = p.parent()?.to_string_lossy().into_owned();
@@ -312,6 +358,7 @@ fn make_launch_target(path: &str) -> Option<LaunchTarget> {
             path: path.to_string(),
             is_dir: false,
             dir,
+            action: action.to_string(),
         })
     } else {
         None
@@ -336,8 +383,9 @@ fn first_launch_path(args: &[String]) -> Option<String> {
 /// plain restart never reopens a stale path.
 #[tauri::command]
 fn get_launch_target(state: State<'_, LaunchArgs>) -> Option<LaunchTarget> {
-    let path = state.0.lock().ok()?.take()?;
-    make_launch_target(&path)
+    let path = state.path.lock().ok()?.take()?;
+    let action = if state.metadata { "metadata" } else { "open" };
+    make_launch_target_with_action(&path, action)
 }
 
 /// Records a completed operation batch: pushes to history, truncates the oldest
@@ -692,7 +740,13 @@ pub fn run() {
             let args: Vec<String> = std::env::args_os()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect();
-            app.manage(LaunchArgs(Mutex::new(first_launch_path(&args))));
+            let metadata = args
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case("--metadata"));
+            app.manage(LaunchArgs {
+                path: Mutex::new(first_launch_path(&args)),
+                metadata,
+            });
 
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
@@ -731,10 +785,15 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            // A second instance was started with a path ("Open with…" while
-            // the app is already running): forward it to the frontend.
+            // A second instance was started with a path ("Open with…" or a
+            // context-menu item while the app is already running): forward it
+            // to the frontend, remembering whether to open the metadata modal.
+            let metadata = args
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case("--metadata"));
             if let Some(path) = first_launch_path(&args) {
-                if let Some(target) = make_launch_target(&path) {
+                let action = if metadata { "metadata" } else { "open" };
+                if let Some(target) = make_launch_target_with_action(&path, action) {
                     let _ = app.emit("open-file", target);
                 }
             }
@@ -771,7 +830,9 @@ pub fn run() {
             check_prompts,
             get_launch_target,
             convert_pngs,
-            cancel_convert
+            cancel_convert,
+            set_context_menu,
+            export_metadata
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1080,16 +1141,21 @@ mod tests {
         let dir_str = dir.path().to_string_lossy().into_owned();
         let file_str = file.to_string_lossy().into_owned();
 
-        let t = make_launch_target(&dir_str).unwrap();
+        let t = make_launch_target_with_action(&dir_str, "open").unwrap();
         assert!(t.is_dir, "folder target must be a dir");
         assert_eq!(t.dir, dir_str);
         assert_eq!(t.path, dir_str);
+        assert_eq!(t.action, "open");
 
-        let t = make_launch_target(&file_str).unwrap();
+        let t = make_launch_target_with_action(&file_str, "open").unwrap();
         assert!(!t.is_dir, "file target must not be a dir");
         assert_eq!(t.path, file_str);
         assert_eq!(t.dir, dir_str, "file target lists its parent folder");
+        assert_eq!(t.action, "open");
 
-        assert!(make_launch_target("C:\\definitely\\missing.jpg").is_none());
+        let t = make_launch_target_with_action(&file_str, "metadata").unwrap();
+        assert_eq!(t.action, "metadata");
+
+        assert!(make_launch_target_with_action("C:\\definitely\\missing.jpg", "open").is_none());
     }
 }
