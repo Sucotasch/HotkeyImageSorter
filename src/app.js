@@ -1476,7 +1476,9 @@ function renderMetadata(meta) {
     });
   });
 
-  // Export buttons: write .metadata.json / .metadata.txt next to the image.
+  // Export buttons: "Export TXT" writes the readable dump; "Export JSON"
+  // writes the ComfyUI workflow graph for AI images (droppable into
+  // ComfyUI), falling back to the full metadata dump for plain photos.
   el.metadataBody.querySelectorAll('[data-export]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       try {

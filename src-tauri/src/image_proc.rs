@@ -181,13 +181,21 @@ fn compress_rgb(rgb: &[u8], w: usize, h: usize, quality: i32) -> Result<Vec<u8>,
 }
 
 /// Converts a PNG to a JPG next to `dst`, embedding ComfyUI metadata the way
-/// ComfyUI's SaveImage does: `prompt` → EXIF Make, `workflow` → EXIF
-/// ImageDescription, A1111 `parameters` → COM segment. Alpha is flattened
-/// onto white (JPEG has no alpha).
+/// ComfyUI's own save path does: the two JSON payloads are minified
+/// (whitespace stripped) and stored in EXIF Make (`workflow:`) / Model
+/// (`prompt:`); A1111 `parameters` → COM segment. Alpha is flattened onto
+/// white (JPEG has no alpha).
 ///
-/// When the ComfyUI metadata cannot fit the JPEG EXIF limit, no JPG is
-/// written at all (`PngToJpgOutcome::TooLarge`) — a JPG without the workflow
-/// is a data-loss trap, so the caller reports and skips the file.
+/// Minification mirrors ComfyUI's JPG output, so a PNG whose pretty-printed
+/// graph exceeds the 65533-byte APP1 limit still converts when the compacted
+/// form fits. When even the minified prompt+workflow pair cannot fit (huge
+/// graphs — JPEG EXIF is hard-capped at 65533 bytes, the same limit ComfyUI
+/// itself has), the workflow is preserved anyway: `prompt` stays in EXIF
+/// Model exactly as ComfyUI writes it (so drag-drop into ComfyUI still
+/// restores the executable API prompt), and the workflow is split across
+/// standard JPEG COM segments (each ≤ 64 KB, unlimited count) with an
+/// `hkis-workflow-<i>-of-<n>:` marker. The app's metadata reader reassembles
+/// them, so nothing is lost.
 pub fn png_to_jpg(src: &str, dst: &str, quality: i32) -> Result<PngToJpgOutcome, String> {
     let chunks = png_meta::extract_text_chunks(src)?;
     let mut prompt = None;
@@ -209,21 +217,40 @@ pub fn png_to_jpg(src: &str, dst: &str, quality: i32) -> Result<PngToJpgOutcome,
     let rgb = flatten_on_white(&rgba);
     let jpeg = compress_rgb(&rgb, w, h, quality)?;
 
-    // --- metadata: does it fit? ---
-    let exif = match exif_writer::build_exif_app1(prompt.as_deref(), workflow.as_deref()) {
-        Ok(Some(e)) => Some(e),
-        Ok(None) => None,
-        Err(_) => {
-            return Ok(PngToJpgOutcome::TooLarge);
-        }
-    };
-
     let mut segments: Vec<jpeg_meta::JpegSegment> = Vec::new();
-    if let Some(e) = exif {
-        segments.push(jpeg_meta::JpegSegment {
+    // --- metadata ---
+    match exif_writer::build_exif_app1(prompt.as_deref(), workflow.as_deref()) {
+        Ok(Some(e)) => segments.push(jpeg_meta::JpegSegment {
             marker: 0xE1,
             data: e,
-        });
+        }),
+        Ok(None) => {}
+        Err(_) => {
+            // Oversized pair: keep the prompt ComfyUI-readable in EXIF and
+            // split the workflow across COM segments (JPEG's standard,
+            // unlimited container for extra data). A non-JSON workflow chunk
+            // is not a ComfyUI graph, so there is nothing compatible to
+            // preserve — keep the old data-loss-safe skip.
+            match exif_writer::build_exif_app1(prompt.as_deref(), None) {
+                Ok(Some(e)) => segments.push(jpeg_meta::JpegSegment {
+                    marker: 0xE1,
+                    data: e,
+                }),
+                Ok(None) => {}
+                Err(_) => return Ok(PngToJpgOutcome::TooLarge),
+            }
+            if let Some(w) = workflow {
+                let Some(minified) = exif_writer::try_minify_json(&w) else {
+                    return Ok(PngToJpgOutcome::TooLarge);
+                };
+                for part in split_workflow_parts(&minified) {
+                    segments.push(jpeg_meta::JpegSegment {
+                        marker: 0xFE,
+                        data: part,
+                    });
+                }
+            }
+        }
     }
     // A1111 `parameters` -> COM segment (no 64 KB limit, multiple allowed).
     if let Some(p) = &parameters {
@@ -242,6 +269,22 @@ pub fn png_to_jpg(src: &str, dst: &str, quality: i32) -> Result<PngToJpgOutcome,
         in_size: std::fs::metadata(src).map(|m| m.len()).unwrap_or(0),
         out_size: std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0),
     })
+}
+
+/// Splits a minified workflow JSON across COM-segment payloads, each marked
+/// `hkis-workflow-<i>-of-<n>:` so the reader can reassemble them. Every part
+/// stays comfortably under the 65533-byte COM limit.
+fn split_workflow_parts(workflow: &str) -> Vec<Vec<u8>> {
+    const PART_MAX: usize = 60_000;
+    let bytes = workflow.as_bytes();
+    let n = bytes.len().div_ceil(PART_MAX);
+    let mut out = Vec::with_capacity(n);
+    for (i, chunk) in bytes.chunks(PART_MAX).enumerate() {
+        let mut part = format!("hkis-workflow-{}-of-{}:", i + 1, n).into_bytes();
+        part.extend_from_slice(chunk);
+        out.push(part);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -383,28 +426,29 @@ mod tests {
         bytes
     }
 
-    /// Reads Make/ImageDescription from a JPEG the way metadata.rs does.
-    fn exif_make_desc(path: &str) -> (Option<String>, Option<String>) {
+    /// Reads Make/Model from a JPEG the way metadata.rs does (ComfyUI's own
+    /// JPG layout: Make holds the workflow, Model the prompt).
+    fn exif_make_model(path: &str) -> (Option<String>, Option<String>) {
         use std::io::BufReader;
         let file = std::fs::File::open(path).unwrap();
         let exif = exif::Reader::new()
             .read_from_container(&mut BufReader::new(file))
             .unwrap();
         let mut make = None;
-        let mut desc = None;
+        let mut model = None;
         for f in exif.fields() {
             if f.tag == exif::Tag::Make {
                 if let exif::Value::Ascii(parts) = &f.value {
                     make = Some(String::from_utf8_lossy(&parts[0]).into_owned());
                 }
             }
-            if f.tag == exif::Tag::ImageDescription {
+            if f.tag == exif::Tag::Model {
                 if let exif::Value::Ascii(parts) = &f.value {
-                    desc = Some(String::from_utf8_lossy(&parts[0]).into_owned());
+                    model = Some(String::from_utf8_lossy(&parts[0]).into_owned());
                 }
             }
         }
-        (make, desc)
+        (make, model)
     }
 
     #[test]
@@ -427,13 +471,151 @@ mod tests {
             "small metadata must fit"
         );
 
-        let (make, desc) = exif_make_desc(dst.to_str().unwrap());
-        assert_eq!(make.as_deref(), Some(&format!("Prompt: {prompt}")[..]));
-        assert_eq!(desc.as_deref(), Some(&format!("Workflow: {workflow}")[..]));
+        // serde_json minifies (and sorts object keys), so compare semantically
+        assert_embedded_json_eq(dst.to_str().unwrap(), "workflow", workflow);
+        assert_embedded_json_eq(dst.to_str().unwrap(), "prompt", prompt);
 
         // Output must be a valid, decodable JPEG of the right size
         let img = image::open(&dst).unwrap();
         assert_eq!(img.dimensions(), (4, 4));
+    }
+
+    /// Asserts that a JPG written by `png_to_jpg` embeds a `kind:` payload
+    /// (Make=workflow, Model=prompt) that parses to the same JSON as the
+    /// original chunk value.
+    fn assert_embedded_json_eq(path: &str, kind: &str, original: &str) {
+        let (make, model) = exif_make_model(path);
+        let body = match kind {
+            "workflow" => make.unwrap(),
+            _ => model.unwrap(),
+        };
+        assert!(
+            body.starts_with(&format!("{kind}:")),
+            "expected `{kind}:` prefix, got: {body:.80}"
+        );
+        let embedded: serde_json::Value =
+            serde_json::from_str(&body[kind.len() + 1..]).expect("embedded JSON must parse");
+        let original_v: serde_json::Value =
+            serde_json::from_str(original).expect("chunk must be JSON");
+        assert_eq!(embedded, original_v, "{kind} must round-trip unchanged");
+    }
+
+    #[test]
+    fn png_to_jpg_converts_pretty_json_over_raw_limit() {
+        // Real-world case: ComfyUI PNG chunks are pretty-printed and the pair
+        // exceeds the APP1 limit raw — but ComfyUI stores the *minified*
+        // graphs in its JPGs, so the conversion must succeed and round-trip.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("pretty.png");
+        let prompt =
+            "{\n  \"3\": {\n    \"inputs\": {\n      \"text\": \"masterpiece, dog\"\n    },\n    \"class_type\": \"CLIPTextEncode\"\n  }\n}";
+        // Indentation-heavy JSON: over the raw APP1 limit, but the compact
+        // form (what ComfyUI stores in its JPGs) fits comfortably.
+        let mut workflow = String::from("{\n  \"id\": \"abc\",\n  \"nodes\": [");
+        for i in 0..2000 {
+            workflow.push_str(&format!(
+                "\n    {{\n      \"id\": {i},\n      \"x\": {i},\n      \"y\": 0\n    }},"
+            ));
+        }
+        // strip the trailing comma, then close the array
+        workflow.truncate(workflow.len() - 1);
+        workflow.push_str("\n  ]\n}");
+        assert!(workflow.len() > 65_533, "fixture must exceed APP1 limit raw");
+        assert!(
+            serde_json::to_string(&serde_json::from_str::<serde_json::Value>(&workflow).unwrap())
+                .unwrap()
+                .len()
+                < 62_000,
+            "fixture must fit once minified"
+        );
+
+        std::fs::write(
+            &src,
+            synth_png_with_text(&[("prompt", prompt), ("workflow", &workflow)]),
+        )
+        .unwrap();
+        let dst = dir.path().join("out.jpg");
+
+        let rep = png_to_jpg(src.to_str().unwrap(), dst.to_str().unwrap(), 90).unwrap();
+        assert!(
+            matches!(rep, PngToJpgOutcome::Converted { .. }),
+            "minified metadata must fit where the raw graph did not"
+        );
+
+        assert_embedded_json_eq(dst.to_str().unwrap(), "workflow", &workflow);
+        assert_embedded_json_eq(dst.to_str().unwrap(), "prompt", prompt);
+    }
+
+    #[test]
+    fn png_to_jpg_splits_oversized_workflow_into_com_parts() {
+        // A graph so large that even the minified form exceeds the JPEG EXIF
+        // limit (65533 bytes — the same limit ComfyUI itself has) must still
+        // convert: prompt stays in EXIF Model, the workflow is split across
+        // COM segments and reassembled losslessly by the metadata reader.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("huge.png");
+        let prompt = r#"{"3":{"inputs":{"text":"masterpiece, dog"},"class_type":"CLIPTextEncode"}}"#;
+        let mut workflow = String::from("{\n  \"id\": \"huge\",\n  \"nodes\": [");
+        for i in 0..3000 {
+            workflow.push_str(&format!(
+                "\n    {{\n      \"id\": {i},\n      \"x\": {i},\n      \"y\": 0\n    }},"
+            ));
+        }
+        workflow.truncate(workflow.len() - 1);
+        workflow.push_str("\n  ]\n}");
+        let minified = exif_writer::try_minify_json(&workflow).unwrap();
+        assert!(minified.len() > 65_533, "fixture must not fit EXIF even minified");
+
+        std::fs::write(
+            &src,
+            synth_png_with_text(&[("prompt", prompt), ("workflow", &workflow)]),
+        )
+        .unwrap();
+        let dst = dir.path().join("out.jpg");
+
+        let rep = png_to_jpg(src.to_str().unwrap(), dst.to_str().unwrap(), 90).unwrap();
+        assert!(
+            matches!(rep, PngToJpgOutcome::Converted { .. }),
+            "oversized workflow must still convert"
+        );
+
+        // Prompt in EXIF Model (ComfyUI-native), workflow only in COM parts.
+        let (make, model) = exif_make_model(dst.to_str().unwrap());
+        assert_eq!(make, None, "Make must be absent for oversized workflow");
+        let model = model.expect("Model must hold the prompt");
+        assert!(model.starts_with("prompt:{"), "got: {model:.60}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&model["prompt:".len()..]).unwrap(),
+            serde_json::from_str::<serde_json::Value>(prompt).unwrap()
+        );
+        let bytes = std::fs::read(&dst).unwrap();
+        let com: Vec<Vec<u8>> = jpeg_meta::extract_segments(&bytes)
+            .iter()
+            .filter(|s| s.marker == 0xFE)
+            .map(|s| s.data.clone())
+            .collect();
+        assert!(!com.is_empty(), "workflow must be stored in COM segments");
+        let mut reassembled = String::new();
+        for part in &com {
+            let text = String::from_utf8_lossy(part);
+            assert!(text.starts_with("hkis-workflow-"), "got: {text:.40}");
+            let body = text.split_once(':').unwrap().1;
+            reassembled.push_str(body);
+        }
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&reassembled).unwrap(),
+                   serde_json::from_str::<serde_json::Value>(&workflow).unwrap());
+
+        // The app's own reader reassembles the parts and surfaces prompt +
+        // workflow (params) exactly like a native EXIF file.
+        let meta = crate::metadata::get_metadata(dst.to_str().unwrap()).unwrap();
+        let ai = meta.ai.expect("oversized JPG must still be detected");
+        assert!(!ai.prompt.is_empty());
+        assert!(ai.params.contains("\"id\":\"huge\""), "workflow must surface in params");
+        // The raw parts must not leak into the comments list.
+        assert!(
+            meta.comments.iter().all(|c| !c.starts_with("hkis-workflow-")),
+            "parts must be hidden from the comments table"
+        );
     }
 
     #[test]

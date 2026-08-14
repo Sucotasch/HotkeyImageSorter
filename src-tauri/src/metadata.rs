@@ -32,11 +32,26 @@ pub fn get_metadata(path: &str) -> Result<ImageMetadata, String> {
     // PNG/WebP/AVIF have no JPEG COM segments — running the JPEG walker over
     // their bytes finds coincidental 0xFF 0xFE sequences and surfaces garbage
     // as "JPEG comments", so only JPEG-family files are scanned.
-    let comments = if matches!(format.as_str(), "jpg" | "jpeg") {
+    let mut comments = if matches!(format.as_str(), "jpg" | "jpeg") {
         read_jpeg_comments(path)
     } else {
         Vec::new()
     };
+
+    // Our PNG→JPG conversion stores an oversized workflow split across COM
+    // segments (`hkis-workflow-<i>-of-<n>:`). Reassemble it and present it as
+    // a synthetic EXIF `Make` so `detect_ai_prompt` picks it up exactly like
+    // the native ComfyUI `workflow:` payload (and it is hidden from the EXIF
+    // table by the same ComfyUI filter below). The raw parts are dropped from
+    // the comments list so the UI does not show marker garbage.
+    let mut exif = exif;
+    if let Some(wf) = reassemble_workflow_parts(&comments) {
+        exif.push(MetadataEntry {
+            key: "Make".to_string(),
+            value: format!("workflow:{wf}"),
+        });
+        comments.retain(|c| !is_workflow_part(c));
+    }
 
     let ai = detect_ai_prompt(&exif, &text_chunks, &comments);
 
@@ -290,6 +305,46 @@ fn read_jpeg_comments(path: &str) -> Vec<String> {
         .map(|s| decode_legacy_text(&s.data))
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// True when a JPEG comment is one of our oversized-workflow parts
+/// (`hkis-workflow-<i>-of-<n>:` marker written by `png_to_jpg`).
+fn is_workflow_part(comment: &str) -> bool {
+    comment.starts_with("hkis-workflow-")
+}
+
+/// Reassembles a workflow split across COM segments by `png_to_jpg`.
+/// Returns the complete JSON when every part is present, valid and the
+/// indices line up; `None` on any inconsistency (the comments are then left
+/// untouched and surface as plain comments).
+fn reassemble_workflow_parts(comments: &[String]) -> Option<String> {
+    let mut parts: Vec<(usize, usize, &str)> = comments
+        .iter()
+        .filter_map(|c| {
+            let rest = c.strip_prefix("hkis-workflow-")?;
+            let (idx, rest) = rest.split_once("-of-")?;
+            let (total, body) = rest.split_once(':')?;
+            Some((idx.parse::<usize>().ok()?, total.parse::<usize>().ok()?, body))
+        })
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let total = parts[0].1;
+    if total == 0 || parts.len() != total || parts.iter().any(|p| p.1 != total) {
+        return None;
+    }
+    parts.sort_by_key(|p| p.0);
+    let mut json = String::new();
+    for (i, _, body) in parts {
+        if i == 0 || i > total {
+            return None;
+        }
+        json.push_str(body);
+    }
+    // Only a complete, parseable JSON document is useful to the AI detector.
+    serde_json::from_str::<serde_json::Value>(&json).ok()?;
+    Some(json)
 }
 
 /// Best-effort decoding of legacy JPEG comment bytes: strict UTF-8 first;
@@ -976,15 +1031,6 @@ fn detect_ai_prompt(
         });
     }
 
-    // JPEG: A1111-era web UIs often put the prompt in a COM segment; some
-    // tools use EXIF UserComment or ImageDescription.
-    for comment in comments {
-        if looks_like_a1111(comment) {
-            if let Some(info) = parse_a1111_parameters(comment) {
-                return Some(info);
-            }
-        }
-    }
     let exif_lookup = |key: &str| {
         exif.iter()
             .find(|e| e.key.eq_ignore_ascii_case(key))
@@ -996,6 +1042,11 @@ fn detect_ai_prompt(
     // payload — it carries the executed prompt texts — and keep the UI
     // workflow graph visible too (it is hidden from the EXIF table, so it
     // must surface in the AI block).
+    //
+    // This scan runs BEFORE the A1111-comment check below: a converted
+    // PNG→JPG carries the ComfyUI prompt in EXIF Model and may also carry an
+    // A1111 `parameters` COM segment — the ComfyUI payload is the primary
+    // source for ComfyUI-generated files.
     let mut workflow_json: Option<String> = None;
     let mut prompt_info: Option<AiPromptInfo> = None;
     for key in ["Make", "Model", "ImageDescription", "UserComment"] {
@@ -1027,6 +1078,17 @@ fn detect_ai_prompt(
     if let Some(wf) = &workflow_json {
         if let Some(info) = parse_comfyui_json("workflow", wf) {
             return Some(info);
+        }
+    }
+
+    // JPEG: A1111-era web UIs often put the prompt in a COM segment; some
+    // tools use EXIF UserComment or ImageDescription. Only reached when no
+    // ComfyUI `prompt:`/`workflow:` payload was found above.
+    for comment in comments {
+        if looks_like_a1111(comment) {
+            if let Some(info) = parse_a1111_parameters(comment) {
+                return Some(info);
+            }
         }
     }
 

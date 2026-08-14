@@ -294,11 +294,19 @@ async fn set_context_menu(enabled: bool) -> Result<(), String> {
     }
 }
 
-/// Exports the full metadata of an image to a sidecar file next to it:
-/// `<name>.metadata.json` or `<name>.metadata.txt`. Used by the Ctrl+Q modal
-/// "Export" buttons.
+/// Exports an image's metadata next to it. The Ctrl+Q modal has two buttons:
+/// - **Export TXT** → `<name>.metadata.txt`, the human-readable dump.
+/// - **Export JSON** → for AI-generated images this is the ComfyUI workflow
+///   graph (droppable straight into ComfyUI); for images without one it
+///   falls back to `<name>.metadata.json`, the full metadata dump.
 #[tauri::command]
 async fn export_metadata(path: String, format: String) -> Result<String, String> {
+    if format.eq_ignore_ascii_case("json") {
+        if let Ok(out) = export_workflow_impl(&path) {
+            return Ok(out);
+        }
+    }
+
     let meta = metadata::get_metadata(&path)?;
     let src = std::path::Path::new(&path);
     let stem = src
@@ -310,14 +318,93 @@ async fn export_metadata(path: String, format: String) -> Result<String, String>
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| ".".to_string());
 
-    let (out_path, content) = if format.eq_ignore_ascii_case("txt") {
-        (format!("{dir}/{stem}.metadata.txt"), metadata::to_text(&meta))
+    let (ext, content) = if format.eq_ignore_ascii_case("txt") {
+        ("metadata.txt", metadata::to_text(&meta))
     } else {
         let json = serde_json::to_string_pretty(&meta).map_err(|e| e.to_string())?;
-        (format!("{dir}/{stem}.metadata.json"), json)
+        ("metadata.json", json)
     };
+    // Never overwrite an existing export — auto-rename on collision.
+    let out_path = file_ops::available_path(&dir, &stem, ext)
+        .map_err(|e| format!("export target: {e}"))?;
     std::fs::write(&out_path, content).map_err(|e| e.to_string())?;
-    Ok(out_path)
+    Ok(out_path.to_string_lossy().into_owned())
+}
+
+/// Writes the ComfyUI workflow of an image to `<name>.workflow.json` next to
+/// it — a file that can be dropped straight into ComfyUI (it loads any JSON
+/// with a `nodes`/`links` graph as a workflow, or an API-shaped prompt).
+/// Sources, in priority order: the AI block's `params` (the workflow graph
+/// surfaced by `detect_ai_prompt` — for PNG→JPG conversions this is the
+/// reassembled oversized workflow), a PNG `workflow` text chunk, then the
+/// `raw` payload (API prompt — also loadable by ComfyUI).
+fn export_workflow_impl(path: &str) -> Result<String, String> {
+    let meta = metadata::get_metadata(path)?;
+    // Priority: the workflow graph surfaced by the AI detector (`params` for
+    // ComfyUI files, incl. the reassembled oversized one), then a PNG
+    // `workflow` text chunk (the canvas graph), then the raw payload (API
+    // prompt — also loadable by ComfyUI).
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some(ai) = &meta.ai {
+        if !ai.params.is_empty() {
+            candidates.push(&ai.params);
+        }
+    }
+    for c in &meta.text_chunks {
+        if c.key.eq_ignore_ascii_case("workflow") {
+            candidates.push(&c.value);
+        }
+    }
+    if let Some(ai) = &meta.ai {
+        if !ai.raw.is_empty() {
+            candidates.push(&ai.raw);
+        }
+    }
+
+    let payload = candidates.iter().find_map(|cand| {
+        // ComfyUI graphs contain bare NaN/Infinity tokens (Python json.dumps)
+        // — sanitise them to null exactly like ComfyUI's parseJsonWithNonFinite.
+        let sanitized = exif_writer::sanitize_non_finite(cand);
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&sanitized) else {
+            return None;
+        };
+        // A ComfyUI graph (UI workflow) or an API prompt (every node has a
+        // `class_type`); anything else is not loadable by ComfyUI.
+        let api_shaped = v
+            .as_object()
+            .map(|o| !o.is_empty() && o.values().all(|n| n.get("class_type").is_some()))
+            .unwrap_or(false);
+        if v.get("nodes").is_some() || api_shaped {
+            // Write the raw text (sanitised only) — never re-serialise it:
+            // serde_json reformats floats, reorders keys and pretty-prints,
+            // all of which can alter values (a 1-ulp float change) and blow
+            // the size up. The byte-faithful chunk is exactly what ComfyUI
+            // itself wrote, so drag-drop loads it identically.
+            Some(sanitized)
+        } else {
+            None
+        }
+    });
+    let Some(payload) = payload else {
+        return Err("no ComfyUI workflow found in this image".to_string());
+    };
+
+    let src = std::path::Path::new(path);
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".to_string());
+    let dir = src
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".to_string());
+    // Never overwrite an existing file — auto-rename like the conversion does
+    // (e.g. exporting a JPG with the same base name as a PNG must not clobber
+    // the PNG's workflow).
+    let out_path = file_ops::available_path(&dir, &stem, "workflow.json")
+        .map_err(|e| format!("export target: {e}"))?;
+    std::fs::write(&out_path, payload).map_err(|e| e.to_string())?;
+    Ok(out_path.to_string_lossy().into_owned())
 }
 
 /// The path the app was launched with (e.g. Windows "Open with…"), handed to
@@ -869,6 +956,76 @@ mod tests {
 
     fn write_file(path: &std::path::Path, contents: &str) {
         std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn export_workflow_writes_comfyui_loadable_graph() {
+        // A PNG→JPG conversion embeds prompt+workflow; the workflow export
+        // must write a bare graph JSON that ComfyUI loads on drag-drop.
+        let dir = tempfile::tempdir().unwrap();
+        let src = synth_png(
+            dir.path(),
+            "w.png",
+            &[
+                ("prompt", "{\"3\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"text\":\"dog\"}}}"),
+                ("workflow", "{\"id\":\"abc\",\"nodes\":[],\"links\":[]}"),
+            ],
+        );
+        let jpg = dir.path().join("w.jpg");
+        image_proc::png_to_jpg(src.to_str().unwrap(), jpg.to_str().unwrap(), 90).unwrap();
+
+        let out = export_workflow_impl(jpg.to_str().unwrap()).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["id"], "abc");
+        assert!(v.get("nodes").is_some(), "export must be a workflow graph");
+
+        // The PNG export must be byte-identical to the source chunk (no
+        // re-serialisation: serde reformats floats and reorders keys).
+        let out_png = export_workflow_impl(src.to_str().unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&out_png).unwrap(),
+            "{\"id\":\"abc\",\"nodes\":[],\"links\":[]}",
+            "PNG export must be the original chunk text unchanged"
+        );
+        // Overwrite protection: a second export must auto-rename, never
+        // clobber the existing file (e.g. PNG vs converted-JPG with the same
+        // base name).
+        let out_png2 = export_workflow_impl(src.to_str().unwrap()).unwrap();
+        assert_ne!(out_png, out_png2, "second export must not overwrite the first");
+        assert!(out_png2.contains(" (") && out_png2.ends_with(".workflow.json"), "got: {out_png2}");
+        assert_eq!(std::fs::read_to_string(&out_png).unwrap(), "{\"id\":\"abc\",\"nodes\":[],\"links\":[]}");
+
+        // A plain photo with no metadata must error cleanly.
+        let plain = dir.path().join("plain.jpg");
+        {
+            let img = image::RgbImage::from_pixel(8, 8, image::Rgb([9, 9, 9]));
+            img.save_with_format(&plain, image::ImageFormat::Jpeg).unwrap();
+        }
+        assert!(export_workflow_impl(plain.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn export_workflow_sanitizes_nan_tokens() {
+        // ComfyUI graphs contain bare NaN (Python json.dumps) — the export
+        // must produce standard JSON (NaN -> null) that any reader accepts.
+        let dir = tempfile::tempdir().unwrap();
+        let src = synth_png(
+            dir.path(),
+            "nan.png",
+            &[(
+                "workflow",
+                "{\"id\":\"x\",\"nodes\":[{\"mode\":[NaN],\"pos\":[-Infinity]}],\"links\":[]}",
+            )],
+        );
+        let jpg = dir.path().join("nan.jpg");
+        image_proc::png_to_jpg(src.to_str().unwrap(), jpg.to_str().unwrap(), 90).unwrap();
+
+        let out = export_workflow_impl(jpg.to_str().unwrap()).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(!text.contains("NaN"), "export must not contain NaN: {text}");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(v["nodes"][0]["mode"][0].is_null());
     }
 
     #[test]
