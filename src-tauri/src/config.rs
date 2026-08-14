@@ -38,6 +38,7 @@ fn default_config() -> AppConfig {
         sort_dir: Some(1),
         minimize_to_tray: Some(true),
         convert_replace: Some(false),
+        convert_show_report: Some(true),
     }
 }
 

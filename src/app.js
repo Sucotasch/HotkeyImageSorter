@@ -54,14 +54,18 @@ const el = {
   cropLabel: document.getElementById('crop-label'),
   modalMetadata: document.getElementById('modal-metadata'),
   metadataBody: document.getElementById('metadata-body'),
-  metaCorner: document.getElementById('btn-meta-corner')
+  metaCorner: document.getElementById('btn-meta-corner'),
+  modalReport: document.getElementById('modal-report'),
+  reportBody: document.getElementById('report-body')
 };
 
-// True when any modal is open (settings or metadata). Used to suppress global
-// hotkeys (Delete, Enter, A–Z, Esc) that must not fire behind a modal.
+// True when any modal is open (settings, metadata or conversion report). Used
+// to suppress global hotkeys (Delete, Enter, A–Z, Esc) that must not fire
+// behind a modal.
 function anyModalOpen() {
   return !el.modalSettings.classList.contains('hidden') ||
-         !el.modalMetadata.classList.contains('hidden');
+         !el.modalMetadata.classList.contains('hidden') ||
+         !el.modalReport.classList.contains('hidden');
 }
 
 // File-operation hotkeys (Delete, A–Z move) stay active while the metadata
@@ -114,6 +118,9 @@ async function init() {
     document.getElementById('toggle-convert-replace').checked = true;
     el.convertMode.value = 'replace';
   }
+  if (state.config.convert_show_report !== false) {
+    document.getElementById('toggle-convert-report').checked = true;
+  }
   
   updateHistoryStats();
 }
@@ -160,6 +167,11 @@ function setupEventListeners() {
     el.convertMode.value = state.config.convert_replace ? 'replace' : 'next';
     invoke('save_config', { config: state.config });
   });
+  document.getElementById('toggle-convert-report').addEventListener('change', (e) => {
+    state.config.convert_show_report = e.target.checked;
+    invoke('save_config', { config: state.config });
+  });
+  document.getElementById('btn-close-report').addEventListener('click', () => closeReportModal());
 
   // Live conversion progress (Rust emits one event per file). Rendered with
   // a 50 ms throttle: at thousands of files the events arrive far faster than
@@ -357,6 +369,25 @@ function filterImages() {
 function applyFilter() {
   state.images = filterImages();
   sortAndRender(state.currentPath);
+}
+
+// Selects all VISIBLE rows (the type filter narrows what "all" means: filter
+// to PNG, then Ctrl+A selects exactly the PNGs). Pressing it again when
+// everything is already selected clears the selection.
+function selectAllOrClear() {
+  const allVisible = state.images.map(i => i.path);
+  const allSelected = allVisible.length > 0
+    && allVisible.every(p => state.selectedPaths.has(p));
+  if (allSelected) {
+    state.selectedPaths.clear();
+    applyRowClasses();
+    notify('Selection cleared', false);
+  } else {
+    state.selectedPaths.clear();
+    allVisible.forEach(p => state.selectedPaths.add(p));
+    applyRowClasses();
+    notify(state.selectedPaths.size + ' selected', false);
+  }
 }
 
 let lastListSignature = '';
@@ -669,6 +700,19 @@ async function selectImage(index) {
 // Global Keys
 async function handleGlobalKeydown(e) {
   const active = document.activeElement;
+  // In text fields Ctrl+A means "select all text" (rename input), so let the
+  // browser handle it there. Everywhere else it selects all visible rows —
+  // including when focus sits on a <select> (the type filter), which would
+  // otherwise make the browser select the whole page instead.
+  const inTextField = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+  if (e.ctrlKey && (e.code === 'KeyA' || e.key.toLowerCase() === 'a') && !inTextField && !anyModalOpen()) {
+    e.preventDefault();
+    selectAllOrClear();
+    // Drop focus from the type-filter <select> so the next Ctrl+A (and the
+    // arrow keys) behave like the list owns the keyboard again.
+    if (active && active.tagName === 'SELECT') active.blur();
+    return;
+  }
   if (active && (active.tagName === 'INPUT' || active.tagName === 'SELECT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
 
   const key = e.key.toLowerCase();
@@ -706,6 +750,8 @@ async function handleGlobalKeydown(e) {
       toggleCrop();
     } else if (!el.modalMetadata.classList.contains('hidden')) {
       toggleMetadataModal();
+    } else if (!el.modalReport.classList.contains('hidden')) {
+      closeReportModal();
     } else if (!el.modalSettings.classList.contains('hidden')) {
       toggleSettings();
     } else if (await isFullscreenActive()) {
@@ -777,14 +823,6 @@ async function handleGlobalKeydown(e) {
   } else if (e.ctrlKey && (code === 'KeyQ' || key === 'q')) {
     e.preventDefault();
     await toggleMetadataModal();
-  } else if (e.ctrlKey && (code === 'KeyA' || key === 'a') && !anyModalOpen()) {
-    // Select all VISIBLE rows (the type filter narrows what "all" means:
-    // filter to PNG, then Ctrl+A selects exactly the PNGs).
-    e.preventDefault();
-    state.selectedPaths.clear();
-    state.images.forEach(i => state.selectedPaths.add(i.path));
-    applyRowClasses();
-    notify(state.selectedPaths.size + ' selected', false);
   } else if (e.ctrlKey && (code === 'KeyJ' || key === 'j') && !anyModalOpen()) {
     e.preventDefault();
     await doConvert();
@@ -933,6 +971,65 @@ function formatSizeMB(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
+function closeReportModal() {
+  el.modalReport.classList.add('hidden');
+  el.reportBody.innerHTML = '';
+}
+
+// Renders the detailed conversion report into the modal. The modal stays open
+// until the user closes it (no auto-dismiss) so large batches can be reviewed.
+function showReportModal(report, total) {
+  const converted = report.converted || [];
+  const skippedLarge = report.skipped_large || [];
+  const errors = report.errors || [];
+  const processed = converted.length + skippedLarge.length + errors.length;
+  const canceled = processed < total;
+
+  let totalIn = 0, totalOut = 0;
+  converted.forEach(c => { totalIn += c.in_size; totalOut += c.out_size; });
+  const saved = totalIn - totalOut;
+  const pct = totalIn > 0 ? Math.round((1 - totalOut / totalIn) * 100) : 0;
+
+  const lines = [];
+  const MAX_LINES = 200;
+  const push = (arr, map, cls) => {
+    arr.slice(0, MAX_LINES).forEach((x, i) => {
+      lines.push(`<div class="report-line ${cls || ''}">${map(x, i)}</div>`);
+    });
+    if (arr.length > MAX_LINES) {
+      lines.push(`<div class="report-line">… and ${arr.length - MAX_LINES} more</div>`);
+    }
+  };
+
+  let summary = `Converted ${converted.length} of ${total} PNG → JPG`;
+  if (saved > 0) summary += ` · saved ${formatSizeMB(saved)} (−${pct}%)`;
+  if (skippedLarge.length) summary += ` · ${skippedLarge.length} skipped (metadata too large)`;
+  if (errors.length) summary += ` · ${errors.length} errors`;
+  if (canceled) summary += ' · stopped early';
+
+  let html = `<div class="report-summary">${escapeHtml(summary)}</div>`;
+  if (converted.length) {
+    html += `<div class="report-section"><h4>Created (${converted.length})</h4>`;
+    push(converted, c => `${escapeHtml(basename(c.output))} — ${formatSizeMB(c.in_size)} → ${formatSizeMB(c.out_size)}`);
+    html += lines.join('') + '</div>';
+    lines.length = 0;
+  }
+  if (skippedLarge.length) {
+    html += `<div class="report-section"><h4>Skipped — metadata too large for JPEG (${skippedLarge.length})</h4>`;
+    push(skippedLarge, p => escapeHtml(basename(p)));
+    html += lines.join('') + '</div>';
+    lines.length = 0;
+  }
+  if (errors.length) {
+    html += `<div class="report-section"><h4>Errors (${errors.length})</h4>`;
+    push(errors, e => escapeHtml(e), 'report-error');
+    html += lines.join('') + '</div>';
+  }
+
+  el.reportBody.innerHTML = html;
+  el.modalReport.classList.remove('hidden');
+}
+
 async function doConvert() {
   if (state.isConverting) return;
   const targets = convertTargets();
@@ -958,22 +1055,28 @@ async function doConvert() {
     state.isConverting = false;
     hideConvertProgress();
 
-    const parts = [`Converted ${report.converted.length} PNG → JPG`];
-    if (report.skipped_large && report.skipped_large.length) {
-      parts.push(`${report.skipped_large.length} skipped (metadata too large)`);
-    }
-    if (report.errors && report.errors.length) {
-      parts.push(`${report.errors.length} errors`);
-    }
-    const savedBytes = report.converted.reduce((s, c) => s + (c.in_size - c.out_size), 0);
-    if (savedBytes > 0) parts.push(`saved ${formatSizeMB(savedBytes)}`);
     // Files neither converted nor skipped nor errored mean the run was
     // cancelled before all files were processed.
     const processed = report.converted.length
       + (report.skipped_large ? report.skipped_large.length : 0)
       + (report.errors ? report.errors.length : 0);
-    if (processed < targets.length) parts.push('canceled');
-    notify(parts.join(' · '), !!(report.errors && report.errors.length));
+    if (state.config.convert_show_report !== false) {
+      // Detailed, user-dismissed report (default on).
+      showReportModal(report, targets.length);
+    } else {
+      // Short toast only.
+      const parts = [`Converted ${report.converted.length} PNG → JPG`];
+      if (report.skipped_large && report.skipped_large.length) {
+        parts.push(`${report.skipped_large.length} skipped (metadata too large)`);
+      }
+      if (report.errors && report.errors.length) {
+        parts.push(`${report.errors.length} errors`);
+      }
+      const savedBytes = report.converted.reduce((s, c) => s + (c.in_size - c.out_size), 0);
+      if (savedBytes > 0) parts.push(`saved ${formatSizeMB(savedBytes)}`);
+      if (processed < targets.length) parts.push('canceled');
+      notify(parts.join(' · '), !!(report.errors && report.errors.length));
+    }
     await loadFiles(state.currentPath);
   } catch (err) {
     state.isConverting = false;
@@ -1214,6 +1317,7 @@ function toggleSettings() {
     renderSettingsList();
     document.getElementById('toggle-tray').checked = state.config.minimize_to_tray !== false;
     document.getElementById('toggle-convert-replace').checked = state.config.convert_replace === true;
+    document.getElementById('toggle-convert-report').checked = state.config.convert_show_report !== false;
     el.convertMode.value = state.config.convert_replace ? 'replace' : 'next';
   } else {
     renderShortcuts();

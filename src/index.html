@@ -57,7 +57,7 @@
         <div class="viewer-actions">
           <button id="btn-rotate" class="btn-action" title="Rotate 90° (Ctrl+R)">⟳ Rotate</button>
           <button id="btn-crop" class="btn-action" title="Toggle Crop (Ctrl+C)">✂ Crop</button>
-          <button id="btn-convert" class="btn-action" title="Convert PNG→JPG (Ctrl+J)">Convert</button>
+          <button id="btn-convert" class="btn-action" title="Convert PNG→JPG (Ctrl+J)">PNG→JPG</button>
           <select id="convert-mode" class="convert-mode" title="Where the converted JPG is saved">
             <option value="next">Next to source</option>
             <option value="replace">Replace source</option>
@@ -88,7 +88,7 @@
         <ul id="shortcut-legend" class="shortcut-list">
           <!-- Populated from config -->
         </ul>
-        <button id="btn-config-hotkeys" class="btn-secondary">Edit Hotkeys</button>
+        <button id="btn-config-hotkeys" class="btn-secondary">Options</button>
       </div>
       <div class="panel-section">
         <h3>Commands</h3>
@@ -126,13 +126,15 @@
     </div>
   </div>
 
-  <!-- Settings Modal -->
+  <!-- Options Modal -->
   <div id="modal-settings" class="modal hidden">
     <div class="modal-content">
-      <h2>Hotkey Configuration</h2>
+      <h2>Options</h2>
+      <h3 class="options-section-title">Shortcuts</h3>
       <div id="hotkey-edit-list" class="hotkey-edit-list">
         <!-- Rendered dynamically -->
       </div>
+      <h3 class="options-section-title">Settings</h3>
       <div class="settings-toggles">
         <label class="toggle-container">
           <span class="toggle-label">Minimize to tray on close</span>
@@ -140,13 +142,31 @@
           <span class="slider round"></span>
         </label>
         <label class="toggle-container">
-          <span class="toggle-label">Convert PNG→JPG: replace source (moves PNG to Recycle Bin)</span>
+          <span class="toggle-label">Convert: replace source (move PNG to Recycle Bin)</span>
           <input type="checkbox" id="toggle-convert-replace">
+          <span class="slider round"></span>
+        </label>
+        <label class="toggle-container">
+          <span class="toggle-label">Show detailed conversion report after converting</span>
+          <input type="checkbox" id="toggle-convert-report">
           <span class="slider round"></span>
         </label>
       </div>
       <div class="modal-actions">
         <button id="btn-close-settings" class="btn-primary">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Conversion Report Modal (shown after a batch when the option is on) -->
+  <div id="modal-report" class="modal hidden">
+    <div class="modal-content report-content">
+      <div class="report-header">
+        <h2>Conversion Report</h2>
+        <button id="btn-close-report" class="btn-secondary" title="Close">✕</button>
+      </div>
+      <div id="report-body" class="report-body">
+        <!-- Rendered dynamically -->
       </div>
     </div>
   </div>

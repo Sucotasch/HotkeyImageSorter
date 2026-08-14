@@ -350,6 +350,138 @@ body, html {
   font-size: 12px;
 }
 
+/* Bottom action row of the Options modal (Done button) */
+.modal-actions {
+  margin-top: 22px;
+  padding-top: 4px;
+}
+
+/* Settings toggles: one switch per row, label left, switch right */
+.settings-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 4px;
+}
+
+.toggle-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.toggle-label {
+  flex: 1;
+  font-size: 13px;
+}
+
+/* Hide the native checkbox; the styled .slider takes its place */
+.toggle-container input[type="checkbox"] {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.slider {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  background: #3a3a52;
+  border-radius: 20px;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.slider::before {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 2px;
+  top: 2px;
+  background: #bbb;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.toggle-container input:checked + .slider {
+  background: var(--accent-color);
+}
+
+.toggle-container input:checked + .slider::before {
+  transform: translateX(16px);
+  background: #fff;
+}
+
+/* Options modal: section headings between shortcuts and settings */
+.options-section-title {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 4px;
+}
+
+/* Conversion report modal */
+.report-content {
+  max-width: 640px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.report-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.report-header .btn-secondary {
+  width: auto;
+  padding: 4px 12px;
+}
+
+.report-body {
+  overflow-y: auto;
+  margin-top: 12px;
+  flex: 1;
+}
+
+.report-summary {
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+
+.report-section {
+  margin-bottom: 14px;
+}
+
+.report-section h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.report-line {
+  font-size: 12px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.report-error {
+  color: #f87171;
+}
+
 /* Buttons and Controls */
 .btn-primary {
   width: 100%;

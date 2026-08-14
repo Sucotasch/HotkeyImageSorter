@@ -27,6 +27,10 @@ pub struct AppConfig {
     /// the trash), `false` (default) writes the JPG next to it.
     #[serde(default)]
     pub convert_replace: Option<bool>,
+    /// Show the detailed conversion report modal after a batch conversion
+    /// (instead of only a short toast). Default: on.
+    #[serde(default)]
+    pub convert_show_report: Option<bool>,
 }
 
 /// A single metadata key/value pair (EXIF field, PNG text chunk, ...).
