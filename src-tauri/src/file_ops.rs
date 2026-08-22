@@ -7,7 +7,9 @@ use std::time::SystemTime;
 /// can't be renamed into a format the app no longer lists). Decodable by the
 /// `image` crate with the enabled features: default formats + AVIF (decoder
 /// via dav1d through the `avif-native` feature, encoder via ravif).
-const SUPPORTED_EXTENSIONS: [&str; 11] = [
+/// The Explorer context menu (context_menu.rs) must cover the same set — a
+/// test asserts the two lists stay in sync.
+pub(crate) const SUPPORTED_EXTENSIONS: [&str; 11] = [
     "jpg", "jpeg", "jif", "png", "gif", "webp", "bmp", "tif", "tiff", "ico", "avif",
 ];
 
@@ -35,7 +37,9 @@ pub fn list_images(dir_path: &str) -> Vec<ImageInfo> {
                         name: entry.file_name().to_string_lossy().to_string(),
                         path: path.to_string_lossy().to_string(),
                         size,
-                        extension: ext.to_string(),
+                        // Normalized to lowercase so consumers (type filter,
+                        // format checks) never need to re-fold the case.
+                        extension: ext.to_lowercase(),
                         modified,
                     });
                 }
@@ -124,6 +128,16 @@ pub fn rename_file(source: &str, new_name: &str) -> Result<String, String> {
     if final_name.is_empty() {
         return Err("File name cannot be empty".to_string());
     }
+    // Windows-invalid characters (reserved punctuation, control chars) only
+    // fail at rename time with a cryptic OS error — reject them up front
+    // with a clear message. (Trailing dots/spaces are already normalized
+    // away by trim + the dot-trim above.)
+    if final_name
+        .chars()
+        .any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || c.is_control())
+    {
+        return Err("File name contains characters Windows does not allow".to_string());
+    }
     if Path::new(&final_name).extension().is_none() {
         if let Some(ext) = source_path.extension() {
             if !ext.is_empty() {
@@ -171,10 +185,9 @@ pub fn rename_file(source: &str, new_name: &str) -> Result<String, String> {
     Ok(target.to_string_lossy().to_string())
 }
 
-/// Returns a path in `dir` with the given stem/ext that does not exist yet,
-/// appending Explorer-style " (1)", " (2)"… suffixes on collision. If `dir`
-/// does not exist it is created first (like move_image does).
-pub fn available_path(dir: &str, stem: &str, ext: &str) -> Result<std::path::PathBuf, String> {
+/// Makes sure `dir` exists and is a directory (creating it when missing) and
+/// returns it as an owned path for the collision helpers below.
+fn ensure_dir(dir: &str) -> Result<std::path::PathBuf, String> {
     let dir_path = Path::new(dir);
     if !dir_path.exists() {
         std::fs::create_dir_all(dir_path).map_err(|e| e.to_string())?;
@@ -182,6 +195,40 @@ pub fn available_path(dir: &str, stem: &str, ext: &str) -> Result<std::path::Pat
     if !dir_path.is_dir() {
         return Err(format!("Target is not a directory: {dir}"));
     }
+    Ok(dir_path.to_path_buf())
+}
+
+/// Returns a path in `dir` with the given full file name that does not exist
+/// yet, appending Explorer-style " (1)", " (2)"… suffixes on collision
+/// (inserted before the last extension, like Explorer: "photo.tar (1).gz").
+pub fn available_path_for(dir: &str, file_name: &str) -> Result<std::path::PathBuf, String> {
+    let dir_path = ensure_dir(dir)?;
+    let p = Path::new(file_name);
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = p
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let mut target = dir_path.join(file_name);
+    let mut count = 1;
+    while target.exists() {
+        target = dir_path.join(format!("{stem} ({count}){ext}"));
+        count += 1;
+    }
+    Ok(target)
+}
+
+/// Returns a path in `dir` with the given stem/ext that does not exist yet,
+/// appending " (1)", " (2)"… suffixes on collision. Unlike
+/// `available_path_for`, `ext` may be a compound extension (e.g.
+/// "workflow.json") and the suffix is inserted before the whole of it, so
+/// "w" + "workflow.json" → "w (1).workflow.json" — the suffix never breaks
+/// the ".workflow.json" naming ComfyUI drag-drop relies on.
+pub fn available_path(dir: &str, stem: &str, ext: &str) -> Result<std::path::PathBuf, String> {
+    let dir_path = ensure_dir(dir)?;
     let mut target = dir_path.join(format!("{stem}.{ext}"));
     let mut count = 1;
     while target.exists() {
@@ -222,24 +269,8 @@ pub fn move_image(source: &str, target_dir: &str) -> Result<String, String> {
     }
 
     let file_name = source_path.file_name().ok_or("Invalid filename")?;
-    let base_target = target_dir_path.join(file_name);
-
-    // Auto-rename if exists
-    let mut count = 1;
-    let stem = source_path
-        .file_stem()
-        .ok_or("Invalid file stem")?
-        .to_string_lossy();
-    let ext = source_path
-        .extension()
-        .ok_or("Invalid extension")?
-        .to_string_lossy();
-    let mut target_path = base_target;
-    while target_path.exists() {
-        let new_name = format!("{}_{}.{}", stem, count, ext);
-        target_path = target_dir_path.join(new_name);
-        count += 1;
-    }
+    // Explorer-style auto-rename on collision (shared with convert/export).
+    let target_path = available_path_for(target_dir, &file_name.to_string_lossy())?;
 
     // rename first (fast, same volume). Only when the failure is genuinely a
     // cross-device move (e.g. C: → D:) fall back to copy+delete — a plain
@@ -303,9 +334,9 @@ mod tests {
         // Second file with the same name must be auto-renamed, not overwritten
         fs::write(a.join("pic.jpg"), b"data2").unwrap();
         let moved2 = move_image(a.join("pic.jpg").to_str().unwrap(), b.to_str().unwrap()).unwrap();
-        assert_eq!(Path::new(&moved2), b.join("pic_1.jpg"));
+        assert_eq!(Path::new(&moved2), b.join("pic (1).jpg"));
         assert_eq!(fs::read_to_string(b.join("pic.jpg")).unwrap(), "data1");
-        assert_eq!(fs::read_to_string(b.join("pic_1.jpg")).unwrap(), "data2");
+        assert_eq!(fs::read_to_string(b.join("pic (1).jpg")).unwrap(), "data2");
     }
 
     #[test]
@@ -433,6 +464,31 @@ mod tests {
     }
 
     #[test]
+    fn rename_file_rejects_windows_invalid_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("pic.jpg");
+        fs::write(&src, b"data").unwrap();
+        for bad in [
+            "a<b.jpg", "a>b.jpg", "a:b.jpg", "a\"b.jpg", "a|b.jpg", "a?b.jpg", "a*b.jpg",
+            "a\tb.jpg",
+        ] {
+            assert!(
+                rename_file(src.to_str().unwrap(), bad).is_err(),
+                "name {bad:?} must be rejected up front"
+            );
+        }
+        assert!(src.exists(), "source untouched on rejected names");
+    }
+
+    #[test]
+    fn available_path_for_keeps_double_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("photo.tar.gz"), b"1").unwrap();
+        let p = available_path_for(dir.path().to_str().unwrap(), "photo.tar.gz").unwrap();
+        assert_eq!(p.file_name().unwrap().to_string_lossy(), "photo.tar (1).gz");
+    }
+
+    #[test]
     fn move_image_into_its_own_folder_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("pic.jpg");
@@ -442,7 +498,7 @@ mod tests {
         assert_eq!(Path::new(&moved), src);
         assert!(src.exists());
         assert!(
-            !dir.path().join("pic_1.jpg").exists(),
+            !dir.path().join("pic (1).jpg").exists(),
             "must not auto-rename the file next to itself"
         );
     }

@@ -7,16 +7,15 @@ This file gives Freebuff context about your project: goals, commands, convention
 - **Setup**: `npm install` (only `@tauri-apps/cli` as devDep; runtime plugins: dialog, single-instance, window-state).
 - **Dev**: `npm run dev` (runs `tauri dev`)
 - **Build**: `npm run build` (runs `tauri build`)
-- **Test**: `cd src-tauri && cargo test` (53 Rust tests) · `npm test` (20 JS tests, `node --test test/*.test.js`, needs Node ≥ 21)
+- **Test**: `cd src-tauri && cargo test` (122 Rust tests) · `npm test` (31 JS tests, `node --test test/*.test.js`, needs Node ≥ 21)
 - **Native build note**: `cargo build` compiles `dav1d-sys` (vendored, AVIF decode) and `turbojpeg-sys` (vendored libjpeg-turbo, lossless JPEG rotation). Both need MSVC + nasm + cmake + pkg-config + meson/ninja (see below). First build takes a few minutes.
 
 ## Architecture
-- **Frontend (`src/`)**: No bundler. `tauri.conf.json` → `frontendDist: "../src"` serves the folder directly. `index.html` loads only `app.js` as an ES module.
+- **Frontend (`src/`)**: No bundler. `tauri.conf.json` → `frontendDist: "../src"` serves the folder directly. `index.html` loads only `app.js` as an ES module. Exactly four files: `index.html`, `app.js`, `utils.js`, `style.css`.
   - `index.html` — layout: sidebar image list (virtualized), main viewer, right shortcuts panel, settings modal, metadata modal (Ctrl+Q)
-  - `app.js` — ALL app logic: state, virtualized list rendering, keyboard handling, hotkey moves, crop UI, settings, metadata modal, prompt badges
-  - `utils.js` — pure helpers (no Tauri): `basename`, `escapeHtml`, `computeResizeRect` (crop), `computeVisibleRange` (virtual list) — unit-tested in `test/`
+  - `app.js` — ALL app logic: state, virtualized list rendering, keyboard handling, hotkey moves, crop UI, settings, metadata modal, prompt badges, debounced config saves (`scheduleConfigSave`)
+  - `utils.js` — pure helpers (no Tauri): `basename`, `escapeHtml`, `formatBytes`, `computeResizeRect` (crop), `computeVisibleRange` (virtual list) — unit-tested in `test/`
   - `style.css` — the real styles (dark theme, CSS vars in `:root`)
-  - `main.js` / `styles.css` — **leftover Tauri template boilerplate, unused/dead; don't edit or reference them**
 - **Backend (`src-tauri/src/`)**: commands registered in `lib.rs` via `invoke_handler`; frontend calls them through `window.__TAURI__.core.invoke(...)` (global Tauri API, `withGlobalTauri: true` — NOT npm imports).
   - `lib.rs` — command registration, undo/redo history (in-memory `AppState` Mutexes), tray icon + minimize-to-tray on close, single-instance, backup/session lifecycle, `get_metadata`/`copy_text`/`check_prompts`
   - `file_ops.rs` — `list_images` (jwalk, max_depth 1) and `move_image` (auto-renames collisions, cross-volume copy fallback)
@@ -34,10 +33,9 @@ This file gives Freebuff context about your project: goals, commands, convention
 - JS: vanilla ES modules, `const { invoke } = window.__TAURI__.core;`, global `state` object, `const el = { ... }` UI-element cache, camelCase helpers.
 - Config is saved wholesale via `save_config` with the full `AppConfig` object (has `#[serde(default)]` on all fields — keep fields backward compatible).
 - History: undo/redo stored as batches; capped at **10 batches** in `lib.rs` (old `edit` backups deleted when evicted). `UndoActionType` is an enum: `Move` | `Edit` (rename is NOT undoable — known limitation).
-- Modal handling: `anyModalOpen()` (settings OR metadata) gates destructive hotkeys; new modals must join this guard.
+- Modal handling, two levels: `anyModalOpen()` (settings OR metadata OR report) gates viewer hotkeys (Ctrl+R/J/C/Z/X, Enter, Ctrl+A); file-op hotkeys (Delete, A–Z moves) use `fileOpsAllowed()` — blocked by the settings and report modals, deliberately still active behind the metadata modal (triage-by-prompt workflow). New modals must join both guards.
 
 ## Gotchas / constraints
-- **Dead files**: `src/main.js` and `src/styles.css` are unused Tauri template leftovers — ignore them.
 - **Supported extensions** in `list_images` (`SUPPORTED_EXTENSIONS` in `file_ops.rs`): `jpg, jpeg, jif, png, gif, webp, bmp, tif, tiff, ico, avif` (case-insensitive). Also enforced on rename so files can't be renamed out of the list. `.jif` = JPEG Interchange Format: the `image` crate doesn't know the extension, so `image_proc.rs` `detect_format()` and `metadata.rs` `get_metadata` map `jif` → `Jpeg` explicitly.
 - **AVIF/WebP**: full support (preview via WebView2, edit via `image` crate). AVIF decode needs `dav1d`; image crate features `avif` (ravif encoder) + `avif-native` (dav1d decoder).
 - **Metadata preservation**: rotate/crop re-encode through `image` crate — JPEG APPn/COM segments and PNG text chunks are extracted and re-injected (JPEG is otherwise lossy on re-encode). JPEG rotate uses **lossless turbojpeg** (`perfect=true`) when dimensions are MCU-aligned; falls back to metadata-preserving re-encode otherwise.

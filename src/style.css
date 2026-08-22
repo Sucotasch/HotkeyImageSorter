@@ -13,7 +13,7 @@ body, html {
   margin: 0;
   padding: 0;
   height: 100%;
-  font-family: 'Inter', sans-serif;
+  font-family: 'Inter', system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
   background-color: var(--bg-color);
   color: var(--text-color);
   overflow: hidden;
@@ -562,11 +562,28 @@ body, html {
 
 .hotkey-edit-list {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   gap: 12px;
   align-items: center;
   margin-bottom: 24px;
 }
+
+/* Small ✕ button that clears a hotkey assignment (disabled when unset) */
+.hotkey-clear {
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-dim);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.hotkey-clear:hover:not(:disabled) { color: #f87171; border-color: #f87171; }
+.hotkey-clear:disabled { opacity: 0.3; cursor: default; }
+
+/* Sort-direction toggle: active arrow highlighted via classes */
+#btn-sort-dir .on { color: var(--primary-color); }
+#btn-sort-dir .off { color: var(--text-dim); }
 
 /* Metadata modal (Ctrl+Q) */
 .metadata-content {
@@ -739,7 +756,7 @@ body, html {
   overflow-y: auto;
 }
 
-/* Toast notifications */
+/* Toast notifications — neutral panel by default, red only for errors */
 #toast {
   position: fixed;
   bottom: 16px;
@@ -748,7 +765,8 @@ body, html {
   max-width: 80%;
   padding: 8px 14px;
   border-radius: 6px;
-  background: #7f1d1d;
+  background: #1f2937;
+  border: 1px solid var(--border-color);
   color: #fff;
   font-size: 13px;
   line-height: 1.4;
@@ -758,7 +776,7 @@ body, html {
   transition: opacity 0.2s;
   pointer-events: none;
 }
-#toast.error { background: #7f1d1d; }
+#toast.error { background: #7f1d1d; border-color: #b91c1c; }
 #toast:not(:empty) { opacity: 1; }
 
 .hidden { display: none; }

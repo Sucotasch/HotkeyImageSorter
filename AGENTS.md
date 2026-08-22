@@ -17,7 +17,6 @@ Tauri 2 desktop app (Windows-first): vanilla JS frontend + Rust backend for keyb
   - `app.js` — ALL app logic (state, virtualized list, keyboard, modals)
   - `utils.js` — pure helpers, unit-tested in `test/`
   - `index.html`, `style.css` — layout and dark-theme styles (CSS vars in `:root`)
-  - `src/main.js` and `src/styles.css` are **dead Tauri template leftovers — ignore them**
 - `src-tauri/src/` — Rust backend; commands registered in `lib.rs` via `invoke_handler`:
   - `file_ops.rs` — list/move (collision auto-rename, cross-volume fallback)
   - `image_proc.rs` — rotate/crop with metadata preservation; lossless JPEG rotate via turbojpeg first; PNG→JPG conversion preserving AI prompt/workflow metadata
@@ -37,7 +36,7 @@ Tauri 2 desktop app (Windows-first): vanilla JS frontend + Rust backend for keyb
 - JS: ES modules, global `state` object, `el = { ... }` UI-element cache, camelCase helpers.
 - `AppConfig` fields all have `#[serde(default)]`; keep config backward compatible — it is saved wholesale via `save_config`.
 - Undo/redo stored as batches, capped at 10 in `lib.rs`; `UndoActionType` = `Move` | `Edit` (rename is not undoable by design).
-- Any new modal must join the `anyModalOpen()` guard that gates destructive hotkeys.
+- Any new modal must join the `anyModalOpen()` guard that gates viewer hotkeys, and decide explicitly whether file-op hotkeys (Delete, A–Z) stay available behind it (`fileOpsAllowed()` — the metadata modal allows them, settings/report do not).
 - README is bilingual (EN + RU) — update both halves when documenting features.
 
 ## Gotchas

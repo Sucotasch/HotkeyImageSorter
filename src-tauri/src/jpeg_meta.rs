@@ -81,30 +81,40 @@ pub fn extract_segments(jpeg: &[u8]) -> Vec<JpegSegment> {
 }
 
 /// Copies the given segments into `jpeg` right after its SOI, skipping any
-/// segment whose (marker + 4-byte signature) is already present in the file.
-/// This is the safety net for the re-encode fallback: `image`-re-encoded JPEGs
-/// lose all APPn/COM, so the originals are re-inserted; if turbojpeg already
-/// preserved some of them, dedup prevents doubles.
+/// segment already present in the file. This is the safety net for the
+/// re-encode fallback: `image`-re-encoded JPEGs lose all APPn/COM, so the
+/// originals are re-inserted; if turbojpeg already preserved some of them,
+/// dedup prevents doubles.
+///
+/// Dedup rules: EXIF APP1 is single-instance by spec, so signature dedup
+/// catches even a byte-different re-serialized copy. Everything else may
+/// legitimately repeat (multi-segment ICC APP2 chains, several COM comments,
+/// standard + extended XMP APP1) and is only dropped when byte-identical.
 pub fn merge_missing_segments(jpeg: &[u8], originals: &[JpegSegment]) -> Vec<u8> {
     let existing = extract_segments(jpeg);
-    let mut out = Vec::with_capacity(jpeg.len() + 1024);
 
-    if jpeg.starts_with(&[0xFF, 0xD8]) {
-        out.extend_from_slice(&[0xFF, 0xD8]);
-        // Insert missing segments between SOI and the rest
-        for seg in originals {
-            let dup = existing
-                .iter()
-                .any(|e| e.marker == seg.marker && e.sig() == seg.sig());
-            if !dup {
-                push_segment(&mut out, seg);
-            }
-        }
-        out.extend_from_slice(&jpeg[2..]);
-    } else {
+    if !jpeg.starts_with(&[0xFF, 0xD8]) {
         // Not a valid JPEG header — leave untouched
         return jpeg.to_vec();
     }
+    let mut out = Vec::with_capacity(jpeg.len() + 1024);
+    out.extend_from_slice(&[0xFF, 0xD8]);
+    // Insert missing segments between SOI and the rest
+    for seg in originals {
+        let dup = if seg.marker == 0xE1 && seg.data.starts_with(b"Exif") {
+            existing
+                .iter()
+                .any(|e| e.marker == seg.marker && e.sig() == seg.sig())
+        } else {
+            existing
+                .iter()
+                .any(|e| e.marker == seg.marker && e.data == seg.data)
+        };
+        if !dup {
+            push_segment(&mut out, seg);
+        }
+    }
+    out.extend_from_slice(&jpeg[2..]);
     out
 }
 
@@ -205,5 +215,48 @@ mod tests {
         assert!(
             merged.ends_with(&[9, 9, 9, 9]) || merged[merged.len() - 4..].iter().all(|&b| b == 9)
         );
+    }
+
+    #[test]
+    fn merge_keeps_all_parts_of_a_multi_segment_icc_profile() {
+        // Large ICC profiles are split across several APP2 segments that all
+        // share the "ICC_PROFILE\0" signature — signature dedup would keep
+        // only the first part and corrupt the profile.
+        let part1 = JpegSegment {
+            marker: 0xE2,
+            data: b"ICC_PROFILE\0\x01\x02aaaa".to_vec(),
+        };
+        let part2 = JpegSegment {
+            marker: 0xE2,
+            data: b"ICC_PROFILE\0\x02\x01bbbb".to_vec(),
+        };
+        let bare = vec![0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x08, 9, 9, 9, 9];
+        let merged = merge_missing_segments(&bare, &[part1.clone(), part2.clone()]);
+        let got = extract_segments(&merged);
+        assert!(got.contains(&part1), "first ICC part must survive");
+        assert!(got.contains(&part2), "second ICC part must survive");
+    }
+
+    #[test]
+    fn merge_drops_only_byte_identical_com_duplicates() {
+        // Two distinct COM comments with the same 4-byte prefix must both
+        // survive; an exact duplicate of one is dropped.
+        let com1 = JpegSegment {
+            marker: 0xFE,
+            data: b"prompt A".to_vec(),
+        };
+        let com2 = JpegSegment {
+            marker: 0xFE,
+            data: b"prompt B".to_vec(),
+        };
+        let with_com1 = synth_jpeg(std::slice::from_ref(&com1));
+        let merged = merge_missing_segments(&with_com1, &[com1.clone(), com2.clone()]);
+        let got = extract_segments(&merged);
+        assert_eq!(
+            got.iter().filter(|s| s.marker == 0xFE).count(),
+            2,
+            "distinct comments kept, exact duplicate dropped"
+        );
+        assert!(got.contains(&com2));
     }
 }

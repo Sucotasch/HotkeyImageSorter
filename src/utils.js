@@ -73,6 +73,21 @@ export function escapeHtml(value) {
 }
 
 /**
+ * Human-readable byte size: B → KB → MB → GB, one decimal past bytes.
+ *
+ * @param {number} bytes
+ * @returns {string}
+ */
+export function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  const kb = bytes / 1024;
+  if (kb < 1024) return kb.toFixed(1) + ' KB';
+  const mb = kb / 1024;
+  if (mb < 1024) return mb.toFixed(1) + ' MB';
+  return (mb / 1024).toFixed(1) + ' GB';
+}
+
+/**
  * Compute the crop-region rect after a resize drag, clamped to the displayed
  * image rect. The edge opposite the dragged handle stays fixed, and the size
  * is derived from that fixed edge — so dragging a left/top handle against the

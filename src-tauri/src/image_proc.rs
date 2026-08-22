@@ -520,7 +520,10 @@ mod tests {
         // strip the trailing comma, then close the array
         workflow.truncate(workflow.len() - 1);
         workflow.push_str("\n  ]\n}");
-        assert!(workflow.len() > 65_533, "fixture must exceed APP1 limit raw");
+        assert!(
+            workflow.len() > 65_533,
+            "fixture must exceed APP1 limit raw"
+        );
         assert!(
             serde_json::to_string(&serde_json::from_str::<serde_json::Value>(&workflow).unwrap())
                 .unwrap()
@@ -554,7 +557,8 @@ mod tests {
         // COM segments and reassembled losslessly by the metadata reader.
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("huge.png");
-        let prompt = r#"{"3":{"inputs":{"text":"masterpiece, dog"},"class_type":"CLIPTextEncode"}}"#;
+        let prompt =
+            r#"{"3":{"inputs":{"text":"masterpiece, dog"},"class_type":"CLIPTextEncode"}}"#;
         let mut workflow = String::from("{\n  \"id\": \"huge\",\n  \"nodes\": [");
         for i in 0..3000 {
             workflow.push_str(&format!(
@@ -564,7 +568,10 @@ mod tests {
         workflow.truncate(workflow.len() - 1);
         workflow.push_str("\n  ]\n}");
         let minified = exif_writer::try_minify_json(&workflow).unwrap();
-        assert!(minified.len() > 65_533, "fixture must not fit EXIF even minified");
+        assert!(
+            minified.len() > 65_533,
+            "fixture must not fit EXIF even minified"
+        );
 
         std::fs::write(
             &src,
@@ -602,18 +609,25 @@ mod tests {
             let body = text.split_once(':').unwrap().1;
             reassembled.push_str(body);
         }
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&reassembled).unwrap(),
-                   serde_json::from_str::<serde_json::Value>(&workflow).unwrap());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&reassembled).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&workflow).unwrap()
+        );
 
         // The app's own reader reassembles the parts and surfaces prompt +
         // workflow (params) exactly like a native EXIF file.
         let meta = crate::metadata::get_metadata(dst.to_str().unwrap()).unwrap();
         let ai = meta.ai.expect("oversized JPG must still be detected");
         assert!(!ai.prompt.is_empty());
-        assert!(ai.params.contains("\"id\":\"huge\""), "workflow must surface in params");
+        assert!(
+            ai.params.contains("\"id\":\"huge\""),
+            "workflow must surface in params"
+        );
         // The raw parts must not leak into the comments list.
         assert!(
-            meta.comments.iter().all(|c| !c.starts_with("hkis-workflow-")),
+            meta.comments
+                .iter()
+                .all(|c| !c.starts_with("hkis-workflow-")),
             "parts must be hidden from the comments table"
         );
     }

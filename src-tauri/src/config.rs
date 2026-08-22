@@ -43,17 +43,26 @@ fn default_config() -> AppConfig {
     }
 }
 
-/// Load a config from an explicit path; falls back to defaults on missing/corrupt file.
+/// Load a config from an explicit path; falls back to defaults on a missing
+/// or corrupt file. A corrupt file is renamed to `config.json.corrupt` first
+/// so the user's hotkeys stay recoverable by hand instead of being silently
+/// overwritten by the next save.
 fn load_config_from(path: &Path) -> AppConfig {
     if let Ok(content) = fs::read_to_string(path) {
-        if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
-            return config;
+        match serde_json::from_str::<AppConfig>(&content) {
+            Ok(config) => return config,
+            Err(_) => {
+                let _ = fs::rename(path, path.with_extension("json.corrupt"));
+            }
         }
     }
     default_config()
 }
 
 /// Save a config to an explicit path, creating parent directories as needed.
+/// The content is written to a sibling temp file and renamed into place, so
+/// a crash or power loss mid-write can never leave a truncated config.json
+/// (which would silently reset the user's hotkeys on the next start).
 fn save_config_to(path: &Path, config: &AppConfig) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.exists() {
@@ -61,7 +70,15 @@ fn save_config_to(path: &Path, config: &AppConfig) -> Result<(), String> {
         }
     }
     let content = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    fs::write(path, content).map_err(|e| e.to_string())
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = fs::write(&tmp, content) {
+        return Err(e.to_string());
+    }
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    Ok(())
 }
 
 pub fn get_config() -> AppConfig {
@@ -115,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn load_corrupt_file_returns_defaults() {
+    fn load_corrupt_file_returns_defaults_and_keeps_backup() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         std::fs::write(&path, "{ not valid json").unwrap();
@@ -123,6 +140,28 @@ mod tests {
         assert_eq!(loaded.hotkeys, default_config().hotkeys);
         assert_eq!(loaded.sort_by, default_config().sort_by);
         assert_eq!(loaded.minimize_to_tray, default_config().minimize_to_tray);
+        // The unreadable file must be preserved for manual recovery instead
+        // of being overwritten by the next save.
+        let backup = dir.path().join("config.json.corrupt");
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            "{ not valid json"
+        );
+        assert!(!path.exists(), "corrupt original must be moved aside");
+    }
+
+    #[test]
+    fn save_is_atomic_no_temp_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // Pre-existing content gets replaced wholesale…
+        std::fs::write(&path, "old").unwrap();
+        save_config_to(&path, &default_config()).unwrap();
+        assert!(
+            serde_json::from_str::<AppConfig>(&std::fs::read_to_string(&path).unwrap()).is_ok()
+        );
+        // …and no temp sibling survives the save.
+        assert!(!dir.path().join("config.json.tmp").exists());
     }
 
     #[test]

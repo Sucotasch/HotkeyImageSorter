@@ -34,6 +34,22 @@ struct ConvertState {
     busy: Arc<AtomicBool>,
 }
 
+/// Resets the conversion busy flag on drop — including after a panic inside
+/// `run_conversion`, which would otherwise leave conversions disabled until
+/// the app restarts.
+struct BusyGuard(Arc<AtomicBool>);
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Serializes config writes: config.json is saved wholesale, and concurrent
+/// `fs::write` calls could interleave on the same path (Windows opens files
+/// with shared write access by default in std).
+#[derive(Default)]
+struct ConfigLock(Mutex<()>);
+
 /// One converted file's entry in the final report.
 #[derive(Clone, Default, serde::Serialize)]
 struct ConvertItem {
@@ -261,14 +277,13 @@ async fn convert_pngs(
     let busy = state.busy.clone();
     let app_handle = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let report = run_conversion(paths, replace, cancel, {
+        let _busy = BusyGuard(busy); // cleared on every exit path, panics included
+        run_conversion(paths, replace, cancel, {
             let app = app_handle.clone();
             move |p| {
                 let _ = app.emit("convert-progress", p);
             }
-        });
-        busy.store(false, Ordering::SeqCst);
-        report
+        })
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -325,8 +340,8 @@ async fn export_metadata(path: String, format: String) -> Result<String, String>
         ("metadata.json", json)
     };
     // Never overwrite an existing export — auto-rename on collision.
-    let out_path = file_ops::available_path(&dir, &stem, ext)
-        .map_err(|e| format!("export target: {e}"))?;
+    let out_path =
+        file_ops::available_path(&dir, &stem, ext).map_err(|e| format!("export target: {e}"))?;
     std::fs::write(&out_path, content).map_err(|e| e.to_string())?;
     Ok(out_path.to_string_lossy().into_owned())
 }
@@ -676,25 +691,25 @@ async fn redo_last_move(state: State<'_, AppState>) -> Result<Option<String>, St
 
 #[tauri::command]
 async fn get_history_stats(state: State<'_, AppState>) -> Result<(usize, usize), String> {
-    let undo_count = state.history.lock().unwrap().iter().map(|b| b.len()).sum();
-    let redo_count = state
-        .redo_history
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|b| b.len())
-        .sum();
+    // Batch counts: one Ctrl+Z/Ctrl+X press reverts exactly one batch, so the
+    // toolbar numbers must count batches, not the files inside them.
+    let undo_count = state.history.lock().unwrap().len();
+    let redo_count = state.redo_history.lock().unwrap().len();
     Ok((undo_count, redo_count))
 }
 
 /// Swaps the contents of `old_path` (live file) and `new_path` (temp backup).
 /// Used identically by both undo and redo for edit actions.
 ///
-/// Uses copies instead of renames: the backup lives in the system temp dir,
-/// which is often on a different volume than the image (e.g. C: vs D:), and
-/// Windows rejects cross-volume renames. Copies work across volumes.
+/// The incoming bytes are staged next to the live file and renamed into
+/// place: `fs::copy` truncates its destination first, so copying straight
+/// onto the live file could leave it half-written if the copy fails midway
+/// (disk full, source lock). A same-directory rename is atomic; copies still
+/// work across volumes because the backup usually lives in %TEMP% (C:) while
+/// the image is on another drive.
 fn swap_edit(action: &UndoAction) -> Result<(), String> {
     let tmp = format!("{}_tmp", action.new_path);
+    let staged = format!("{}.hkis-swap", action.old_path);
     let result = (|| {
         file_ops::copy_with_retry(
             std::path::Path::new(&action.old_path),
@@ -702,8 +717,15 @@ fn swap_edit(action: &UndoAction) -> Result<(), String> {
         )?;
         file_ops::copy_with_retry(
             std::path::Path::new(&action.new_path),
-            std::path::Path::new(&action.old_path),
+            std::path::Path::new(&staged),
         )?;
+        if let Err(e) = file_ops::rename_with_retry(
+            std::path::Path::new(&staged),
+            std::path::Path::new(&action.old_path),
+        ) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(e);
+        }
         file_ops::copy_with_retry(
             std::path::Path::new(&tmp),
             std::path::Path::new(&action.new_path),
@@ -759,10 +781,14 @@ async fn get_config() -> AppConfig {
     config::get_config()
 }
 
-/// Returns everything the Ctrl+Q metadata modal needs for one image.
+/// Returns everything the Ctrl+Q metadata modal needs for one image. The
+/// blocking file I/O runs on the blocking pool so big files can't stall the
+/// async runtime (config saves, progress events).
 #[tauri::command]
 async fn get_metadata(path: String) -> Result<crate::models::ImageMetadata, String> {
-    metadata::get_metadata(&path)
+    tauri::async_runtime::spawn_blocking(move || metadata::get_metadata(&path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Copies the given text to the system clipboard (for metadata copy buttons).
@@ -773,14 +799,19 @@ async fn copy_text(text: String) -> Result<(), String> {
 }
 
 /// Returns the subset of `paths` whose files contain AI-generation metadata
-/// (used for the lazy "has prompt" badges in the list).
+/// (used for the lazy "has prompt" badges in the list). File scans run on the
+/// blocking pool — a batch of multi-MB PNGs must not block the runtime.
 #[tauri::command]
 async fn check_prompts(paths: Vec<String>) -> Vec<String> {
-    metadata::check_prompts(&paths)
+    // A JoinError (worker panic) degrades to "no badges", never a dead UI.
+    tauri::async_runtime::spawn_blocking(move || metadata::check_prompts(&paths))
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
-async fn save_config(config: AppConfig) -> Result<(), String> {
+async fn save_config(config: AppConfig, state: State<'_, ConfigLock>) -> Result<(), String> {
+    let _guard = state.0.lock().unwrap();
     config::save_config(config)
 }
 
@@ -827,9 +858,7 @@ pub fn run() {
             let args: Vec<String> = std::env::args_os()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect();
-            let metadata = args
-                .iter()
-                .any(|a| a.eq_ignore_ascii_case("--metadata"));
+            let metadata = args.iter().any(|a| a.eq_ignore_ascii_case("--metadata"));
             app.manage(LaunchArgs {
                 path: Mutex::new(first_launch_path(&args)),
                 metadata,
@@ -875,9 +904,7 @@ pub fn run() {
             // A second instance was started with a path ("Open with…" or a
             // context-menu item while the app is already running): forward it
             // to the frontend, remembering whether to open the metadata modal.
-            let metadata = args
-                .iter()
-                .any(|a| a.eq_ignore_ascii_case("--metadata"));
+            let metadata = args.iter().any(|a| a.eq_ignore_ascii_case("--metadata"));
             if let Some(path) = first_launch_path(&args) {
                 let action = if metadata { "metadata" } else { "open" };
                 if let Some(target) = make_launch_target_with_action(&path, action) {
@@ -899,6 +926,7 @@ pub fn run() {
             cancel: Arc::new(AtomicBool::new(false)),
             busy: Arc::new(AtomicBool::new(false)),
         })
+        .manage(ConfigLock::default())
         .invoke_handler(tauri::generate_handler![
             list_files,
             move_images,
@@ -967,7 +995,10 @@ mod tests {
             dir.path(),
             "w.png",
             &[
-                ("prompt", "{\"3\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"text\":\"dog\"}}}"),
+                (
+                    "prompt",
+                    "{\"3\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"text\":\"dog\"}}}",
+                ),
                 ("workflow", "{\"id\":\"abc\",\"nodes\":[],\"links\":[]}"),
             ],
         );
@@ -992,15 +1023,25 @@ mod tests {
         // clobber the existing file (e.g. PNG vs converted-JPG with the same
         // base name).
         let out_png2 = export_workflow_impl(src.to_str().unwrap()).unwrap();
-        assert_ne!(out_png, out_png2, "second export must not overwrite the first");
-        assert!(out_png2.contains(" (") && out_png2.ends_with(".workflow.json"), "got: {out_png2}");
-        assert_eq!(std::fs::read_to_string(&out_png).unwrap(), "{\"id\":\"abc\",\"nodes\":[],\"links\":[]}");
+        assert_ne!(
+            out_png, out_png2,
+            "second export must not overwrite the first"
+        );
+        assert!(
+            out_png2.contains(" (") && out_png2.ends_with(".workflow.json"),
+            "got: {out_png2}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&out_png).unwrap(),
+            "{\"id\":\"abc\",\"nodes\":[],\"links\":[]}"
+        );
 
         // A plain photo with no metadata must error cleanly.
         let plain = dir.path().join("plain.jpg");
         {
             let img = image::RgbImage::from_pixel(8, 8, image::Rgb([9, 9, 9]));
-            img.save_with_format(&plain, image::ImageFormat::Jpeg).unwrap();
+            img.save_with_format(&plain, image::ImageFormat::Jpeg)
+                .unwrap();
         }
         assert!(export_workflow_impl(plain.to_str().unwrap()).is_err());
     }

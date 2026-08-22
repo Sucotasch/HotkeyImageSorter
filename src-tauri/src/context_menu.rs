@@ -11,8 +11,12 @@
 
 use std::process::Command;
 
-/// Image extensions that get the two context-menu items.
-const IMAGE_EXTS: [&str; 7] = ["png", "jpg", "jpeg", "jif", "webp", "avif", "gif"];
+/// Image extensions that get the two context-menu items. Kept in sync with
+/// file_ops::SUPPORTED_EXTENSIONS — a test asserts the two lists match, so a
+/// newly supported format can't silently miss Explorer integration.
+const IMAGE_EXTS: [&str; 11] = [
+    "png", "jpg", "jpeg", "jif", "gif", "webp", "bmp", "tif", "tiff", "ico", "avif",
+];
 
 /// Display name of the cascading menu shown in the Explorer context menu.
 const GROUP_LABEL: &str = "HK Image Sorter";
@@ -31,14 +35,26 @@ fn quoted_exe() -> Result<String, String> {
 /// Runs `reg.exe` with the given args, returning its output. On failure the
 /// stderr is surfaced so the UI can show why (e.g. reg.exe missing).
 fn run_reg(args: &[&str]) -> Result<String, String> {
-    let out = Command::new("reg.exe")
-        .args(args)
+    let mut cmd = Command::new("reg.exe");
+    cmd.args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // The app runs with the windows subsystem — a console subprocess
+        // would otherwise flash a black window on every toggle.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd
         .output()
         .map_err(|e| format!("failed to run reg.exe: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned().trim().to_string())
+        Err(String::from_utf8_lossy(&out.stderr)
+            .into_owned()
+            .trim()
+            .to_string())
     }
 }
 
@@ -92,7 +108,11 @@ fn install_file_items() -> Result<(), String> {
         let meta = format!("{top}\\shell\\b_Metadata");
         reg_add(&meta, Some("MUIVerb"), "Show Metadata Info")?;
         reg_add(&meta, Some("Icon"), &exe)?;
-        reg_add(&format!("{meta}\\command"), None, &format!("{exe} --metadata \"%1\""))?;
+        reg_add(
+            &format!("{meta}\\command"),
+            None,
+            &format!("{exe} --metadata \"%1\""),
+        )?;
     }
     Ok(())
 }
@@ -152,10 +172,14 @@ mod tests {
     #[test]
     fn cascade_subkeys_have_sort_prefixes() {
         let top = sfa_path("png", "HKIS");
-        assert_eq!(format!("{top}\\shell\\a_Open\\command"),
-            r"HKCU\Software\Classes\SystemFileAssociations\.png\shell\HKIS\shell\a_Open\command");
-        assert_eq!(format!("{top}\\shell\\b_Metadata\\command"),
-            r"HKCU\Software\Classes\SystemFileAssociations\.png\shell\HKIS\shell\b_Metadata\command");
+        assert_eq!(
+            format!("{top}\\shell\\a_Open\\command"),
+            r"HKCU\Software\Classes\SystemFileAssociations\.png\shell\HKIS\shell\a_Open\command"
+        );
+        assert_eq!(
+            format!("{top}\\shell\\b_Metadata\\command"),
+            r"HKCU\Software\Classes\SystemFileAssociations\.png\shell\HKIS\shell\b_Metadata\command"
+        );
     }
 
     #[test]
@@ -170,7 +194,16 @@ mod tests {
     }
 
     #[test]
-    fn seven_image_extensions() {
-        assert_eq!(IMAGE_EXTS.len(), 7);
+    fn image_exts_match_supported_extensions() {
+        let mut a: Vec<_> = IMAGE_EXTS.to_vec();
+        let mut b: Vec<_> = crate::file_ops::SUPPORTED_EXTENSIONS.to_vec();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "context menu must cover every supported image type");
+    }
+
+    #[test]
+    fn eleven_image_extensions() {
+        assert_eq!(IMAGE_EXTS.len(), 11);
     }
 }

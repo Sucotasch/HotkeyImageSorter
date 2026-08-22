@@ -1,8 +1,10 @@
-# Plan — next milestone
+# Plan — next milestone (HISTORICAL)
+
+> **Status: SHIPPED.** Everything in this plan (H7 session backups, M6 list virtualization, lossless JPEG + metadata-preserving edits, the metadata viewer with AI-prompt detection and lazy badges) was implemented through v0.1.x. Kept as a record of the decisions; see `knowledge.md` for current reality.
 
 Scope: **H7** (session backups), **M6** (true list virtualization), **Lossless JPEG + metadata-preserving edits**, **Metadata viewer (Ctrl+I) with AI-prompt detection + lazy "has prompt" badges**.
 
-Status: **PLANNING** (no code changed). Decisions confirmed with the user:
+Original decisions confirmed with the user:
 1. JPEG rotation → **hybrid**: `turbojpeg` (libjpeg-turbo) lossless 90/180/270, fallback to metadata-preserving re-encode.
 2. AI prompts + EXIF/XMP/ICC must be **preserved** through rotate/crop.
 3. "Has prompt" badge → **lazy**: detect only for selected + visible rows (async, cached).

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { basename, escapeHtml, computeResizeRect, computeVisibleRange, compareImages } from '../src/utils.js';
+import { basename, escapeHtml, computeResizeRect, computeVisibleRange, compareImages, formatBytes } from '../src/utils.js';
 
 test('basename extracts the file name from a forward-slash path', () => {
   assert.equal(basename('C:/Users/me/pics/photo.jpg'), 'photo.jpg');
@@ -28,6 +28,25 @@ test('escapeHtml escapes quotes and ampersands', () => {
 
 test('escapeHtml leaves plain text untouched', () => {
   assert.equal(escapeHtml('plain path C:/pics/1.jpg'), 'plain path C:/pics/1.jpg');
+});
+
+// --- Byte formatting ---
+
+test('formatBytes renders bytes below 1 KB', () => {
+  assert.equal(formatBytes(0), '0 B');
+  assert.equal(formatBytes(512), '512 B');
+});
+
+test('formatBytes renders kilobytes with one decimal', () => {
+  assert.equal(formatBytes(1024), '1.0 KB');
+  assert.equal(formatBytes(1536), '1.5 KB');
+  assert.equal(formatBytes(58 * 1024), '58.0 KB');
+});
+
+test('formatBytes scales to megabytes and gigabytes', () => {
+  assert.equal(formatBytes(1024 * 1024), '1.0 MB');
+  assert.equal(formatBytes(2.5 * 1024 * 1024), '2.5 MB');
+  assert.equal(formatBytes(3 * 1024 ** 3), '3.0 GB');
 });
 
 // Image rect spanning x 300..900, y 100..700 (window coords)

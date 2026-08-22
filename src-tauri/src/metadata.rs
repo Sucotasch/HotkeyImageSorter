@@ -3,7 +3,7 @@
 //! AI-generation metadata (AUTOMATIC1111, ComfyUI, InvokeAI).
 
 use crate::models::{AiPromptInfo, ImageMetadata, MetadataEntry};
-use crate::{jpeg_meta, png_meta};
+use crate::{exif_writer, jpeg_meta, png_meta};
 use std::io::BufReader;
 
 /// Collects everything the frontend needs to render the metadata modal.
@@ -324,7 +324,11 @@ fn reassemble_workflow_parts(comments: &[String]) -> Option<String> {
             let rest = c.strip_prefix("hkis-workflow-")?;
             let (idx, rest) = rest.split_once("-of-")?;
             let (total, body) = rest.split_once(':')?;
-            Some((idx.parse::<usize>().ok()?, total.parse::<usize>().ok()?, body))
+            Some((
+                idx.parse::<usize>().ok()?,
+                total.parse::<usize>().ok()?,
+                body,
+            ))
         })
         .collect();
     if parts.is_empty() {
@@ -434,9 +438,6 @@ fn has_prompt_fast(path: &str) -> bool {
     if !can_carry_prompt(path) {
         return false;
     }
-    let Ok(bytes) = std::fs::read(path) else {
-        return false;
-    };
 
     let ext = std::path::Path::new(path)
         .extension()
@@ -444,53 +445,93 @@ fn has_prompt_fast(path: &str) -> bool {
         .unwrap_or("")
         .to_ascii_lowercase();
     if ext == "png" {
-        // PNG: scan raw chunk types only (tEXt/zTXt/iTXt with known keywords).
-        // Walk the chunk stream cheaply instead of the full png decode.
-        find_png_ai_chunk(&bytes)
+        // PNG: walk the chunk stream with seeks (text chunks usually sit
+        // AFTER the IDAT pixel data, so a prefix read would miss them — but
+        // the pixels never need to be read).
+        find_png_ai_chunk_file(path)
     } else {
-        // JPEG: look for known prompt markers in COM segments and EXIF fields.
-        find_jpeg_prompt_marker(&bytes)
+        // JPEG: every metadata segment precedes SOS near the start of the
+        // file — a bounded prefix finds them without pulling a 50 MB file
+        // into memory for a badge check.
+        match read_prefix(path, 2 * 1024 * 1024) {
+            Some(bytes) => find_jpeg_prompt_marker(&bytes),
+            None => false,
+        }
     }
 }
 
-/// Scans PNG chunk headers for text chunks whose keyword looks like AI
-/// metadata (parameters / prompt / workflow / sd-metadata / metadata / XMP).
-/// Chunk types and keywords are visible without inflating IDAT. The XMP
-/// keyword alone is not enough (plain camera XMP exists) — its payload is
-/// checked for generation markers.
-fn find_png_ai_chunk(bytes: &[u8]) -> bool {
-    let mut i = 8usize; // skip 8-byte signature
-    while i + 8 <= bytes.len() {
-        let len = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
-        let ctype = &bytes[i + 4..i + 8];
-        match ctype {
-            b"tEXt" | b"zTXt" | b"iTXt" => {
-                // keyword runs up to the NUL separator
-                let data_start = i + 8;
-                let data_end = data_start.saturating_add(len).min(bytes.len());
-                if let Some(nul) = bytes[data_start..data_end].iter().position(|&b| b == 0) {
-                    let keyword = &bytes[data_start..data_start + nul];
-                    if is_ai_keyword(keyword) {
-                        return true;
-                    }
-                    // XMP chunks (Draw Things / Krea) carry the prompt inside
-                    // <dc:description> or <exif:UserComment> — only those are
-                    // generation metadata, plain tool XMP is not.
-                    if keyword.eq_ignore_ascii_case(b"XML:com.adobe.xmp")
-                        && xmp_payload_looks_ai(&bytes[data_start..data_end])
-                    {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
+/// Reads at most `max_bytes` from the start of the file.
+fn read_prefix(path: &str, max_bytes: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    (&mut f).take(max_bytes).read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// True when a tEXt/zTXt/iTXt chunk's payload carries AI metadata (known
+/// keyword, or an XMP payload with generation markers). Shared by the
+/// in-memory walker and the streaming file walker so the two can't drift.
+fn png_chunk_is_ai(data: &[u8]) -> bool {
+    let Some(nul) = data.iter().position(|&b| b == 0) else {
+        return false;
+    };
+    let keyword = &data[..nul];
+    if is_ai_keyword(keyword) {
+        return true;
+    }
+    // XMP chunks (Draw Things / Krea) carry the prompt inside
+    // <dc:description> or <exif:UserComment> — only those are generation
+    // metadata, plain tool XMP is not.
+    keyword.eq_ignore_ascii_case(b"XML:com.adobe.xmp") && xmp_payload_looks_ai(data)
+}
+
+/// Streaming variant of the PNG chunk scan used by `has_prompt_fast`: walks
+/// the file's chunk headers and seeks past the IDAT pixel data instead of
+/// reading it — badge scans on multi-MB PNGs no longer pull whole files
+/// into memory. Text chunks are read in full (their payload is the metadata
+/// we check); absurdly large chunk lengths from corrupt files are treated
+/// as data to skip, never as an allocation size.
+fn find_png_ai_chunk_file(path: &str) -> bool {
+    use std::io::{BufReader, Read, Seek, SeekFrom};
+    const TEXT_CHUNK_MAX: u64 = 32 * 1024 * 1024;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut r = BufReader::new(file);
+    let mut header = [0u8; 8];
+    if r.read_exact(&mut header).is_err() {
+        return false;
+    }
+    loop {
+        let mut chdr = [0u8; 8];
+        if r.read_exact(&mut chdr).is_err() {
+            return false;
         }
-        i = i + 12 + len; // 8 header + 4 CRC
-        if i > bytes.len() {
-            break;
+        let len = u32::from_be_bytes([chdr[0], chdr[1], chdr[2], chdr[3]]) as u64;
+        let is_text = matches!(&chdr[4..8], b"tEXt" | b"zTXt" | b"iTXt");
+        if is_text && len <= TEXT_CHUNK_MAX {
+            let mut data = vec![0u8; len as usize];
+            if r.read_exact(&mut data).is_err() {
+                return false;
+            }
+            if png_chunk_is_ai(&data) {
+                return true;
+            }
+            // skip the CRC after the consumed payload
+            if r.seek(SeekFrom::Current(4)).is_err() {
+                return false;
+            }
+        } else {
+            if &chdr[4..8] == b"IEND" {
+                return false;
+            }
+            // pixel data (or an implausibly large "text" chunk): skip data + CRC
+            if r.seek(SeekFrom::Current(len as i64 + 4)).is_err() {
+                return false;
+            }
         }
     }
-    false
 }
 
 fn is_ai_keyword(keyword: &[u8]) -> bool {
@@ -830,7 +871,8 @@ fn xml_unescape(s: &str) -> String {
 /// NUL byte.
 fn parse_generation_data(raw: &str) -> Option<AiPromptInfo> {
     let json = raw.trim_end_matches('\0').trim();
-    let v: serde_json::Value = serde_json::from_str(&sanitize_json_float_tokens(json)).ok()?;
+    let v: serde_json::Value =
+        serde_json::from_str(&exif_writer::sanitize_non_finite(json)).ok()?;
     let obj = v.as_object()?;
     let prompt = obj
         .get("prompt")
@@ -863,7 +905,7 @@ fn parse_generation_data(raw: &str) -> Option<AiPromptInfo> {
 /// `positive_prompt`/`negative_prompt` (+ model, loras, …); `invokeai_graph`
 /// is the workflow graph, whose texts are found by walking the JSON tree.
 fn parse_invokeai_metadata(keyword: &str, raw: &str) -> Option<AiPromptInfo> {
-    let v: serde_json::Value = serde_json::from_str(&sanitize_json_float_tokens(raw)).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&exif_writer::sanitize_non_finite(raw)).ok()?;
     if keyword == "invokeai_metadata" {
         let obj = v.as_object()?;
         let prompt = obj
@@ -1309,7 +1351,8 @@ fn extract_prompt_from_json(s: &str) -> Option<String> {
         // Parse first: the wrapper may itself contain "```json" inside its
         // `raw` string, so un-fencing must happen only once the outer JSON
         // has been unwrapped.
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&sanitize_json_float_tokens(&text))
+        if let Ok(v) =
+            serde_json::from_str::<serde_json::Value>(&exif_writer::sanitize_non_finite(&text))
         {
             // Krea wraps a failed LLM parse in {"error":…, "raw":"<json>"}.
             if let Some(raw) = v.get("raw").and_then(|r| r.as_str()) {
@@ -1590,60 +1633,17 @@ fn resolve_sampler_input(
 /// reference the text-encoding nodes — those are split into the prompt and
 /// negative prompt respectively. Without a sampler link (e.g. a workflow UI
 /// graph), every text-encoding node is collected into the prompt block.
-/// Rewrites bare `NaN` / `Infinity` / `-Infinity` JSON tokens (which some
-/// generators, e.g. Krea, emit for `is_changed`) to `null` so the strict
-/// serde_json parser accepts the graph. Strings are left untouched.
-fn sanitize_json_float_tokens(json: &str) -> String {
-    let mut out = String::with_capacity(json.len());
-    let mut i = 0;
-    let mut in_string = false;
-    while i < json.len() {
-        let ch = json[i..].chars().next().unwrap();
-        if in_string {
-            out.push(ch);
-            i += ch.len_utf8();
-            if ch == '\\' {
-                if let Some(c2) = json[i..].chars().next() {
-                    out.push(c2);
-                    i += c2.len_utf8();
-                }
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => {
-                in_string = true;
-                out.push('"');
-                i += 1;
-            }
-            'N' if json[i..].starts_with("NaN") => {
-                out.push_str("null");
-                i += 3;
-            }
-            'I' if json[i..].starts_with("Infinity") => {
-                out.push_str("null");
-                i += 8;
-            }
-            '-' if json[i..].starts_with("-Infinity") => {
-                out.push_str("null");
-                i += 9;
-            }
-            _ => {
-                out.push(ch);
-                i += ch.len_utf8();
-            }
-        }
-    }
-    out
-}
-
+/// Bare `NaN` / `Infinity` / `-Infinity` JSON tokens (which some generators,
+/// e.g. Krea, emit for `is_changed`) are rewritten to `null` by the shared
+/// `exif_writer::sanitize_non_finite` (boundary-checked, mirroring
+/// ComfyUI's own regex) so the strict serde_json parser accepts the graph.
+/// Strings are left untouched.
 fn parse_comfyui_json(keyword: &str, json: &str) -> Option<AiPromptInfo> {
     if !json.trim_start().starts_with('{') {
         return None;
     }
-    let v: serde_json::Value = serde_json::from_str(&sanitize_json_float_tokens(json)).ok()?;
+    let v: serde_json::Value =
+        serde_json::from_str(&exif_writer::sanitize_non_finite(json)).ok()?;
     let obj = v.as_object()?;
 
     // Executed-prompt graphs: follow the sampler's positive/negative links
@@ -2140,7 +2140,8 @@ mod tests {
 
     #[test]
     fn png_chunk_scanner_finds_ai_keyword() {
-        // A1111-style trailing parameters chunk
+        // A1111-style trailing parameters chunk, scanned through the real
+        // streaming walker (file on disk, IDAT skipped via seek).
         let mut bytes = Vec::new();
         {
             let w = &mut std::io::Cursor::new(&mut bytes);
@@ -2157,7 +2158,10 @@ mod tests {
                 .unwrap();
             writer.finish().unwrap();
         }
-        assert!(find_png_ai_chunk(&bytes));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(has_prompt_fast(path.to_str().unwrap()));
     }
 
     #[test]
@@ -2178,7 +2182,10 @@ mod tests {
                 .unwrap();
             writer.finish().unwrap();
         }
-        assert!(!find_png_ai_chunk(&bytes));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("b.png");
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(!has_prompt_fast(path.to_str().unwrap()));
     }
 
     #[test]
@@ -2393,7 +2400,7 @@ mod tests {
             bytes
         })
         .unwrap();
-        assert!(find_png_ai_chunk(&std::fs::read(&path).unwrap()));
+        assert!(has_prompt_fast(path.to_str().unwrap()));
 
         // positive_prompt keyword alone triggers the badge
         let path2 = dir.path().join("pos.png");
@@ -2417,7 +2424,7 @@ mod tests {
             bytes
         })
         .unwrap();
-        assert!(find_png_ai_chunk(&std::fs::read(&path2).unwrap()));
+        assert!(has_prompt_fast(path2.to_str().unwrap()));
     }
 
     #[test]

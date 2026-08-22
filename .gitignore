@@ -34,3 +34,6 @@ _sort_probe.mjs
 *.njsproj
 *.sln
 *.sw?
+
+# Local image data inside the repo tree (never commit)
+PNG/

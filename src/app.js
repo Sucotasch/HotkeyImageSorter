@@ -1,4 +1,4 @@
-import { basename, escapeHtml, computeResizeRect, computeVisibleRange, compareImages } from './utils.js';
+import { basename, escapeHtml, computeResizeRect, computeVisibleRange, compareImages, formatBytes } from './utils.js';
 
 const { invoke } = window.__TAURI__.core;
 const { open } = window.__TAURI__.dialog;
@@ -70,9 +70,44 @@ function anyModalOpen() {
 
 // File-operation hotkeys (Delete, A–Z move) stay active while the metadata
 // modal is open, so files can be triaged by prompt presence without closing
-// it; only the settings modal (editable fields) blocks them.
-function settingsModalOpen() {
-  return !el.modalSettings.classList.contains('hidden');
+// it. The settings modal (editable fields) and the conversion report (a
+// passive dialog over a possibly-changed file list) do block them.
+function fileOpsAllowed() {
+  return el.modalSettings.classList.contains('hidden') &&
+         el.modalReport.classList.contains('hidden');
+}
+
+// --- Config persistence ----------------------------------------------------
+
+// Config saves go through one debounced path: navigation (selectImage) fires
+// a save per keypress otherwise, and each one becomes a separate file write
+// on the Rust side. Explicit user changes (Options, sort, toggles) flush
+// immediately.
+let saveConfigTimer = null;
+let configSaveFailed = false;
+
+async function flushConfigSave() {
+  clearTimeout(saveConfigTimer);
+  saveConfigTimer = null;
+  try {
+    await invoke('save_config', { config: state.config });
+  } catch (err) {
+    // One visible failure beats a toast per save: settings silently not
+    // persisting (e.g. read-only config location) must be surfaced once.
+    if (!configSaveFailed) {
+      configSaveFailed = true;
+      notify('Failed to save settings: ' + err);
+    }
+  }
+}
+
+function scheduleConfigSave(immediate = false) {
+  if (immediate) {
+    flushConfigSave();
+    return;
+  }
+  if (saveConfigTimer) return;
+  saveConfigTimer = setTimeout(flushConfigSave, 500);
 }
 
 // Transient error/info toast
@@ -92,10 +127,17 @@ function notify(msg, isError = true) {
 
 // Initialization
 async function init() {
-  state.config = await invoke('get_config');
+  // A config that fails to load must not leave a dead UI — fall back to
+  // defaults and keep booting.
+  try {
+    state.config = await invoke('get_config');
+  } catch (err) {
+    state.config = { hotkeys: {} };
+    notify('Failed to load settings, using defaults: ' + err);
+  }
   if (state.config.sort_by) state.sort.by = state.config.sort_by;
   if (state.config.sort_dir) state.sort.dir = state.config.sort_dir;
-  
+
   document.getElementById('sort-by').value = state.sort.by;
   updateSortButtonUI();
 
@@ -103,7 +145,12 @@ async function init() {
   setupEventListeners();
   // A path passed on the command line ("Open with…") takes priority over the
   // remembered folder.
-  const launchTarget = await invoke('get_launch_target');
+  let launchTarget = null;
+  try {
+    launchTarget = await invoke('get_launch_target');
+  } catch (err) {
+    console.warn('Failed to read launch target:', err);
+  }
   if (launchTarget) {
     await openLaunchTarget(launchTarget);
   } else if (state.config.last_folder) {
@@ -163,16 +210,16 @@ function setupEventListeners() {
   el.convertMode.addEventListener('change', (e) => {
     state.config.convert_replace = e.target.value === 'replace';
     document.getElementById('toggle-convert-replace').checked = state.config.convert_replace;
-    invoke('save_config', { config: state.config });
+    scheduleConfigSave(true);
   });
   document.getElementById('toggle-convert-replace').addEventListener('change', (e) => {
     state.config.convert_replace = e.target.checked;
     el.convertMode.value = state.config.convert_replace ? 'replace' : 'next';
-    invoke('save_config', { config: state.config });
+    scheduleConfigSave(true);
   });
   document.getElementById('toggle-convert-report').addEventListener('change', (e) => {
     state.config.convert_show_report = e.target.checked;
-    invoke('save_config', { config: state.config });
+    scheduleConfigSave(true);
   });
   // Explorer context-menu registration (HKCU — no admin needed). Reverting
   // the toggle on failure keeps the UI truthful about what's registered.
@@ -181,7 +228,7 @@ function setupEventListeners() {
     try {
       await invoke('set_context_menu', { enabled: want });
       state.config.context_menu = want;
-      await invoke('save_config', { config: state.config });
+      await flushConfigSave();
       notify(want ? 'Context menu items added' : 'Context menu items removed', false);
     } catch (err) {
       e.target.checked = !want;
@@ -205,7 +252,7 @@ function setupEventListeners() {
   
   document.getElementById('toggle-tray').addEventListener('change', (e) => {
     state.config.minimize_to_tray = e.target.checked;
-    invoke('save_config', { config: state.config });
+    scheduleConfigSave(true);
   });
 
   el.mainImage.addEventListener('wheel', (e) => {
@@ -260,13 +307,13 @@ function setupEventListeners() {
   document.getElementById('sort-by').addEventListener('change', (e) => {
     state.sort.by = e.target.value;
     state.config.sort_by = state.sort.by;
-    invoke('save_config', { config: state.config });
+    scheduleConfigSave(true);
     sortAndRender();
   });
   document.getElementById('btn-sort-dir').addEventListener('click', () => {
     state.sort.dir *= -1;
     state.config.sort_dir = state.sort.dir;
-    invoke('save_config', { config: state.config });
+    scheduleConfigSave(true);
     updateSortButtonUI();
     sortAndRender();
   });
@@ -285,11 +332,9 @@ function setupEventListeners() {
 
 function updateSortButtonUI() {
   const btn = document.getElementById('btn-sort-dir');
-  if (state.sort.dir === 1) {
-    btn.innerHTML = `<span style="color:var(--primary-color)">↑</span> <span style="color:var(--text-dim)">↓</span>`;
-  } else {
-    btn.innerHTML = `<span style="color:var(--text-dim)">↑</span> <span style="color:var(--primary-color)">↓</span>`;
-  }
+  btn.innerHTML = state.sort.dir === 1
+    ? '<span class="on">↑</span> <span class="off">↓</span>'
+    : '<span class="off">↑</span> <span class="on">↓</span>';
 }
 
 // Opens a folder, or the folder containing the given file with that file
@@ -298,7 +343,7 @@ async function openLaunchTarget(target) {
   state.folder = target.dir;
   state.config.last_folder = target.dir;
   state.config.last_file = target.is_dir ? null : target.path;
-  invoke('save_config', { config: state.config });
+  scheduleConfigSave();
   if (target.is_dir) {
     el.imageList.scrollTop = 0;
     await loadFiles();
@@ -320,7 +365,7 @@ async function selectFolder() {
   if (selected) {
     state.folder = selected;
     state.config.last_folder = selected;
-    invoke('save_config', { config: state.config });
+    scheduleConfigSave(true);
     // A brand-new folder starts at the top of the list
     el.imageList.scrollTop = 0;
     loadFiles();
@@ -351,6 +396,11 @@ async function loadFiles(initialLoadPath = null) {
     state.images = [];
     promptPaths.clear();
     promptChecked.clear();
+    // Reset like the success path does: a stale signature would make the next
+    // successful load of the same folder skip the DOM rebuild (spacer height
+    // stays 0 → the list can't scroll).
+    lastListSignature = '';
+    rebuildFilterOptions();
     renderList();
     el.fileCount.textContent = '0 images';
     updateMetaCorner();
@@ -362,7 +412,8 @@ async function loadFiles(initialLoadPath = null) {
 // the current folder. The list is already in memory, so this is a cheap pass
 // (no disk scanning) even for 20k-file folders.
 function rebuildFilterOptions() {
-  const types = new Set(state.allImages.map(i => i.extension.toLowerCase()));
+  // ImageInfo.extension is normalized to lowercase by the backend.
+  const types = new Set(state.allImages.map(i => i.extension));
   const current = state.filterType;
   el.filterType.innerHTML = '';
   const all = document.createElement('option');
@@ -383,7 +434,7 @@ function rebuildFilterOptions() {
 // Applies state.filterType to state.allImages, producing the visible list.
 function filterImages() {
   return state.filterType
-    ? state.allImages.filter(i => i.extension.toLowerCase() === state.filterType)
+    ? state.allImages.filter(i => i.extension === state.filterType)
     : state.allImages.slice();
 }
 
@@ -672,12 +723,18 @@ function handleItemClick(e, index) {
 
 async function selectImage(index) {
   if (index < 0 || index >= state.images.length) return;
-  state.currentIndex = index;
   const img = state.images[index];
+  // The crop region was chosen for a different file — never let it crop
+  // whatever file happens to be shown next (e.g. after PNG→JPG replace moved
+  // the source to the trash and the selection jumped to a neighbour).
+  if (state.isCropActive && img.path !== state.currentPath) {
+    toggleCrop();
+  }
+  state.currentIndex = index;
   state.currentPath = img.path;
-  
+
   state.config.last_file = img.path;
-  invoke('save_config', { config: state.config });
+  scheduleConfigSave();
   
   // Use Tauri's convertFileSrc for local images. The cache-buster forces the
   // webview to re-fetch from disk: without it, the same URL (this file was
@@ -693,8 +750,7 @@ async function selectImage(index) {
   // Update meta info
   const date = new Date(img.modified * 1000);
   el.infoDate.textContent = date.toLocaleDateString('ru-RU', { day:'2-digit', month:'2-digit', year:'numeric' }) + ' ' + date.toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit' });
-  const kb = img.size / 1024;
-  el.infoSize.textContent = kb >= 1024 ? (kb / 1024).toFixed(1) + ' MB' : Math.round(kb) + ' KB';
+  el.infoSize.textContent = formatBytes(img.size);
   el.infoDimensions.textContent = '…px';
   el.fileMeta.classList.remove('hidden');
   // get natural dimensions after load
@@ -798,7 +854,7 @@ async function handleGlobalKeydown(e) {
             renderList();
         }
     }
-  } else if ((code === 'Delete' || key === 'delete') && !e.ctrlKey && !e.metaKey && !e.altKey && !settingsModalOpen()) {
+  } else if ((code === 'Delete' || key === 'delete') && !e.ctrlKey && !e.metaKey && !e.altKey && fileOpsAllowed()) {
     if (state.currentPath) {
       const pathsToRemove = state.selectedPaths.size > 0 ? Array.from(state.selectedPaths) : [state.currentPath];
       
@@ -860,7 +916,7 @@ async function handleGlobalKeydown(e) {
   } else if ((key === 'enter' || code === 'Enter') && !(active && active.tagName === 'BUTTON') && !anyModalOpen()) {
     e.preventDefault();
     await toggleFullscreen();
-  } else if (code && code.startsWith('Key') && !e.ctrlKey && !e.metaKey && !e.altKey && !settingsModalOpen()) {
+  } else if (code && code.startsWith('Key') && !e.ctrlKey && !e.metaKey && !e.altKey && fileOpsAllowed()) {
     const char = code.replace('Key', '').toLowerCase();
     const targetDir = state.config.hotkeys[char];
     if (targetDir && state.currentPath) {
@@ -1309,13 +1365,18 @@ async function executeCrop() {
   const y = Math.round((regionRect.top - imgRect.top) / scale);
   const w = Math.round(regionRect.width / scale);
   const h = Math.round(regionRect.height / scale);
-  
+
   const finalX = Math.max(0, Math.min(x, el.mainImage.naturalWidth - 1));
   const finalY = Math.max(0, Math.min(y, el.mainImage.naturalHeight - 1));
   const finalW = Math.max(1, Math.min(w, el.mainImage.naturalWidth - finalX));
   const finalH = Math.max(1, Math.min(h, el.mainImage.naturalHeight - finalY));
-  
-  await invoke('crop_image', { path: state.currentPath, x: finalX, y: finalY, width: finalW, height: finalH });
+
+  try {
+    await invoke('crop_image', { path: state.currentPath, x: finalX, y: finalY, width: finalW, height: finalH });
+  } catch (err) {
+    notify("Crop failed: " + err);
+    return; // keep the crop region active so the user can retry
+  }
   toggleCrop();
   refreshCurrentImage();
   updateHistoryStats();
@@ -1343,7 +1404,7 @@ function toggleSettings() {
     el.convertMode.value = state.config.convert_replace ? 'replace' : 'next';
   } else {
     renderShortcuts();
-    invoke('save_config', { config: state.config });
+    scheduleConfigSave(true);
   }
 }
 
@@ -1394,6 +1455,13 @@ function renderMetadata(meta) {
   if (fileName) fileName.textContent = meta.name;
   const sections = [];
 
+  // Copy-button payloads (prompts, raw ComfyUI JSON) can be tens of KB —
+  // embedding them in data-* attributes would rebuild that HTML on every
+  // navigation while the modal is open. They are kept here and referenced
+  // by index instead.
+  const metaPayloads = [];
+  const payloadRef = (text) => metaPayloads.push(text) - 1;
+
   // File summary
   const date = meta.modified ? new Date(meta.modified * 1000).toLocaleString() : '—';
   sections.push(`
@@ -1425,9 +1493,9 @@ function renderMetadata(meta) {
         <div class="metadata-ai-head">
           <h3>AI Generation <span class="meta-ai-source">${escapeHtml(ai.source)}</span></h3>
           <div class="meta-copy-btns">
-            ${ai.prompt ? `<button class="btn-secondary" data-copy="${escapeAttr(ai.prompt)}" title="Copy prompt">Copy prompt</button>` : ''}
-            ${ai.negative_prompt ? `<button class="btn-secondary" data-copy="${escapeAttr(ai.negative_prompt)}" title="Copy negative prompt">Copy negative</button>` : ''}
-            <button class="btn-secondary" data-copy="${escapeAttr(ai.raw)}" title="Copy raw payload">Copy raw</button>
+            ${ai.prompt ? `<button class="btn-secondary" data-copy-idx="${payloadRef(ai.prompt)}" title="Copy prompt">Copy prompt</button>` : ''}
+            ${ai.negative_prompt ? `<button class="btn-secondary" data-copy-idx="${payloadRef(ai.negative_prompt)}" title="Copy negative prompt">Copy negative</button>` : ''}
+            <button class="btn-secondary" data-copy-idx="${payloadRef(ai.raw)}" title="Copy raw payload">Copy raw</button>
           </div>
         </div>
         ${promptBlock}
@@ -1465,10 +1533,10 @@ function renderMetadata(meta) {
   el.metadataBody.innerHTML = sections.join('');
 
   // Copy buttons
-  el.metadataBody.querySelectorAll('[data-copy]').forEach((btn) => {
+  el.metadataBody.querySelectorAll('[data-copy-idx]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       try {
-        await invoke('copy_text', { text: btn.dataset.copy });
+        await invoke('copy_text', { text: metaPayloads[Number(btn.dataset.copyIdx)] });
         notify('Copied to clipboard', false);
       } catch (err) {
         notify('Copy failed: ' + err);
@@ -1494,30 +1562,21 @@ function renderMetadata(meta) {
   });
 }
 
-function formatBytes(bytes) {
-  if (bytes < 1024) return bytes + ' B';
-  const kb = bytes / 1024;
-  if (kb < 1024) return kb.toFixed(1) + ' KB';
-  return (kb / 1024).toFixed(1) + ' MB';
-}
-
-function escapeAttr(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
 function renderSettingsList() {
   el.hotkeyEditList.innerHTML = '';
   "abcdefghijklmnopqrstuvwxyz".split('').forEach(key => {
     const row = document.createElement('div');
     row.style.display = 'contents';
-    const currentPath = state.config.hotkeys[key] || 'Not set';
-    
+    const assigned = state.config.hotkeys[key];
+    const currentPath = assigned || 'Not set';
+
     const kbd = document.createElement('kbd');
     kbd.textContent = key.toUpperCase();
-    
+
     const span = document.createElement('span');
     span.textContent = currentPath;
-    
+    span.title = currentPath;
+
     const btn = document.createElement('button');
     btn.textContent = 'Set';
     btn.addEventListener('click', async () => {
@@ -1531,6 +1590,22 @@ function renderSettingsList() {
     row.appendChild(kbd);
     row.appendChild(span);
     row.appendChild(btn);
+
+    // Clearing an assignment needs its own control — there is no other way
+    // to remove a hotkey once set.
+    const clear = document.createElement('button');
+    clear.className = 'hotkey-clear';
+    clear.textContent = '✕';
+    clear.title = 'Clear this hotkey';
+    clear.disabled = !assigned;
+    clear.addEventListener('click', () => {
+      delete state.config.hotkeys[key];
+      scheduleConfigSave(true);
+      renderSettingsList();
+      renderShortcuts();
+    });
+    row.appendChild(clear);
+
     el.hotkeyEditList.appendChild(row);
   });
 }

@@ -59,26 +59,19 @@ pub fn sanitize_non_finite(s: &str) -> String {
                 out.push('"');
                 i += 1;
             }
-            b'N'
-                if bytes[i..].starts_with(b"NaN")
-                    && token_start(i)
-                    && token_end(i + 3) =>
-            {
+            b'N' if bytes[i..].starts_with(b"NaN") && token_start(i) && token_end(i + 3) => {
                 out.push_str("null");
                 i += 3;
             }
-            b'I'
-                if bytes[i..].starts_with(b"Infinity")
-                    && token_start(i)
-                    && token_end(i + 8) =>
-            {
+            b'I' if bytes[i..].starts_with(b"Infinity") && token_start(i) && token_end(i + 8) => {
                 out.push_str("null");
                 i += 8;
             }
-            b'-'
-                if bytes.get(i + 1..).is_some_and(|r| r.starts_with(b"Infinity"))
-                    && token_start(i)
-                    && token_end(i + 9) =>
+            b'-' if bytes
+                .get(i + 1..)
+                .is_some_and(|r| r.starts_with(b"Infinity"))
+                && token_start(i)
+                && token_end(i + 9) =>
             {
                 out.push_str("null");
                 i += 9;
@@ -120,7 +113,10 @@ pub fn build_exif_app1(
 ) -> Result<Option<Vec<u8>>, String> {
     let mut entries: Vec<(u16, Vec<u8>)> = Vec::new();
     if let Some(w) = workflow {
-        entries.push((0x010F, format!("workflow:{}\0", minify_json(w)).into_bytes()));
+        entries.push((
+            0x010F,
+            format!("workflow:{}\0", minify_json(w)).into_bytes(),
+        ));
     }
     if let Some(p) = prompt {
         entries.push((0x0110, format!("prompt:{}\0", minify_json(p)).into_bytes()));
@@ -239,7 +235,10 @@ mod tests {
             make.as_deref(),
             Some("workflow:{\"id\":\"abc\",\"nodes\":[]}")
         );
-        assert_eq!(model.as_deref(), Some("prompt:{\"text\":\"masterpiece, dog\"}"));
+        assert_eq!(
+            model.as_deref(),
+            Some("prompt:{\"text\":\"masterpiece, dog\"}")
+        );
     }
 
     #[test]
@@ -269,7 +268,9 @@ mod tests {
     #[test]
     fn keeps_non_json_values_raw() {
         // Not valid JSON -> embedded unchanged, not rejected.
-        let app1 = build_exif_app1(None, Some("not json at all")).unwrap().unwrap();
+        let app1 = build_exif_app1(None, Some("not json at all"))
+            .unwrap()
+            .unwrap();
         let (make, model) = exif_make_model(&wrap_as_jpeg(&app1));
         assert_eq!(make.as_deref(), Some("workflow:not json at all"));
         assert_eq!(model, None);
@@ -299,7 +300,10 @@ mod tests {
         // strip the trailing comma, then close the array
         pretty.truncate(pretty.len() - 1);
         pretty.push_str("\n  ]\n}");
-        assert!(pretty.len() > APP1_MAX, "fixture must exceed APP1 limit raw");
+        assert!(
+            pretty.len() > APP1_MAX,
+            "fixture must exceed APP1 limit raw"
+        );
         assert!(
             serde_json::to_string(&serde_json::from_str::<serde_json::Value>(&pretty).unwrap())
                 .unwrap()
