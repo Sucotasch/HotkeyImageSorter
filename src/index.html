@@ -12,18 +12,21 @@
     <!-- Sidebar: Image List -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <button id="btn-select-folder" class="btn-primary">Select Folder</button>
+        <div class="folder-row">
+          <span id="current-folder" class="current-folder">No folder selected</span>
+          <button id="btn-select-folder" class="btn-secondary folder-btn">Change…</button>
+        </div>
         <div class="sort-controls">
           <select id="sort-by">
             <option value="name">Name</option>
             <option value="modified">Date</option>
             <option value="size">Size</option>
           </select>
-          <button id="btn-sort-dir" title="Toggle Sort Direction">↑↓</button>
+          <button id="btn-sort-dir" title="Toggle Sort Direction" aria-label="Toggle sort direction">↑↓</button>
           <select id="filter-type" class="filter-type" title="Filter by file type — Ctrl+A selects what's visible">
             <option value="">All types</option>
           </select>
-          <button id="btn-refresh" title="Refresh list (keep position)">⟳</button>
+          <button id="btn-refresh" title="Refresh list (keep position)" aria-label="Refresh list">⟳</button>
         </div>
       </div>
       <div id="image-list-container" class="virtual-list">
@@ -31,13 +34,14 @@
       </div>
       <div class="sidebar-footer">
         <span id="file-count">0 images</span>
+        <span id="selection-chip" class="selection-chip hidden" title="Clear selection (Ctrl+A)"></span>
       </div>
     </aside>
 
     <!-- Main Viewport -->
     <main class="viewer-container">
       <div id="image-viewport" class="viewport">
-        <img id="main-image" src="" alt="">
+        <img id="main-image" alt="">
         <button id="btn-meta-corner" class="meta-corner hidden" title="Show AI metadata (Ctrl+Q)" aria-label="Show AI metadata">✦</button>
         <!-- Confirm/cancel bar for crop mode (Cropper.js owns the image while active) -->
         <div id="crop-actions" class="crop-actions hidden">
@@ -63,7 +67,7 @@
           <button id="btn-cancel-convert" class="btn-action" title="Cancel conversion">✕</button>
         </div>
         <div class="file-info">
-          <span id="current-file-path" class="info-path" title="Double-click for fullscreen">No image selected</span>
+          <span id="current-file-path" class="info-path">No image selected</span>
           <div id="file-meta" class="file-meta hidden">
             <span id="info-dimensions" class="meta-item">—</span>
             <span id="info-date" class="meta-item">—</span>
@@ -90,7 +94,7 @@
           <kbd>Insert</kbd> Toggle Select &amp; Down<br>
           <kbd>Home</kbd> <kbd>End</kbd> First / Last<br>
           <kbd>Del</kbd> Move to Recycle Bin<br>
-          <kbd>Dbl-click</kbd> Rename File<br>
+          Dbl-click — Rename File<br>
           <kbd>Ctrl+R</kbd> Rotate 90°<br>
           <kbd>Ctrl+C</kbd> Toggle Crop<br>
           <kbd>Ctrl+J</kbd> Convert PNG→JPG<br>
@@ -105,12 +109,12 @@
   </div>
 
   <!-- Metadata Modal -->
-  <div id="modal-metadata" class="modal hidden">
+  <div id="modal-metadata" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-metadata-title">
     <div class="modal-content metadata-content">
       <div class="metadata-header">
-        <h2>Image Metadata</h2>
+        <h2 id="modal-metadata-title">Image Metadata</h2>
         <span id="metadata-file" class="metadata-file"></span>
-        <button id="btn-close-metadata" class="btn-secondary" title="Close (Esc)">✕</button>
+        <button id="btn-close-metadata" class="btn-secondary" title="Close (Esc)" aria-label="Close metadata">✕</button>
       </div>
       <div id="metadata-body" class="metadata-body">
         <div class="metadata-loading">Loading…</div>
@@ -119,9 +123,9 @@
   </div>
 
   <!-- Options Modal -->
-  <div id="modal-settings" class="modal hidden">
+  <div id="modal-settings" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-settings-title">
     <div class="modal-content">
-      <h2>Options</h2>
+      <h2 id="modal-settings-title">Options</h2>
       <h3 class="options-section-title">Shortcuts</h3>
       <div id="hotkey-edit-list" class="hotkey-edit-list">
         <!-- Rendered dynamically -->
@@ -156,11 +160,11 @@
   </div>
 
   <!-- Conversion Report Modal (shown after a batch when the option is on) -->
-  <div id="modal-report" class="modal hidden">
+  <div id="modal-report" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-report-title">
     <div class="modal-content report-content">
       <div class="report-header">
-        <h2>Conversion Report</h2>
-        <button id="btn-close-report" class="btn-secondary" title="Close">✕</button>
+        <h2 id="modal-report-title">Conversion Report</h2>
+        <button id="btn-close-report" class="btn-secondary" title="Close" aria-label="Close report">✕</button>
       </div>
       <div id="report-body" class="report-body">
         <!-- Rendered dynamically -->

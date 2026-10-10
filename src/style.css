@@ -2,10 +2,15 @@
   --bg-color: #121212;
   --bg-panel: #1e1e1e;
   --primary-color: #3b82f6;
+  /* WCAG AA variants: filled button fill (white text ≥4.5:1) and accent used
+     as text on dark surfaces (≥4.5:1). */
+  --primary-strong: #2563eb;
+  --accent-color: #6366f1;
+  --accent-text: #a5b4fc;
+  --accent-strong: #4f46e5;
   --secondary-color: #4b5563;
   --text-color: #e5e7eb;
   --text-dim: #9ca3af;
-  --accent-color: #6366f1;
   --border-color: #2e2e2e;
 }
 
@@ -13,11 +18,22 @@ body, html {
   margin: 0;
   padding: 0;
   height: 100%;
-  font-family: 'Inter', system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
+  font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
   background-color: var(--bg-color);
   color: var(--text-color);
   overflow: hidden;
 }
+
+/* Dark-theme scrollbars (default light ones glare in the dark UI) */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #3a3a52;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: #4a4a66; }
 
 /* App Layout */
 .app-container {
@@ -37,6 +53,31 @@ body, html {
 .sidebar-header {
   padding: 16px;
   border-bottom: 1px solid var(--border-color);
+}
+
+/* Open-folder row: orientation first, folder switch demoted to a compact
+   secondary action next to it. */
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.current-folder {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
+.btn-secondary.folder-btn {
+  width: auto;
+  flex-shrink: 0;
+  padding: 5px 10px;
+  font-size: 12px;
 }
 
 .sort-controls {
@@ -86,7 +127,7 @@ body, html {
 /* Lazy AI-prompt badge (✦) shown when the file carries generation metadata */
 .prompt-badge {
   flex-shrink: 0;
-  color: var(--accent-color);
+  color: var(--accent-text);
   font-size: 11px;
   cursor: help;
 }
@@ -126,10 +167,40 @@ body, html {
 }
 
 .sidebar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 8px 16px;
   background-color: #181818;
   font-size: 12px;
   color: var(--text-dim);
+}
+
+/* Selection state chip: visible count + one-click clear */
+.selection-chip {
+  background: rgba(59, 130, 246, 0.28);
+  color: #dbeafe;
+  padding: 2px 9px;
+  border-radius: 10px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.selection-chip:hover { background: rgba(59, 130, 246, 0.45); }
+
+/* Empty folder hint in the list area */
+.list-empty {
+  position: absolute;
+  top: 40%;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 0 16px;
 }
 
 /* Main Viewport */
@@ -177,7 +248,7 @@ body, html {
   border-radius: 50%;
   border: 1px solid var(--accent-color);
   background: rgba(30, 30, 46, 0.85);
-  color: var(--accent-color);
+  color: var(--accent-text);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
@@ -189,10 +260,10 @@ body, html {
   transition: background 0.15s, color 0.15s, transform 0.15s, box-shadow 0.15s;
 }
 .meta-corner:hover {
-  background: var(--accent-color);
+  background: var(--accent-strong);
   color: #fff;
   transform: scale(1.1);
-  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.5);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
 }
 .meta-corner:active {
   transform: scale(0.95);
@@ -220,14 +291,14 @@ body, html {
   padding: 5px 10px;
   background: #2a2a3e;
   border: 1px solid var(--accent-color);
-  color: var(--accent-color);
+  color: var(--accent-text);
   border-radius: 4px;
   cursor: pointer;
   font-size: 12px;
   transition: background 0.15s;
 }
-.btn-action:hover { background: var(--accent-color); color: #fff; }
-.btn-action.active { background: var(--accent-color); color: #fff; }
+.btn-action:hover { background: var(--accent-strong); color: #fff; }
+.btn-action.active { background: var(--accent-strong); color: #fff; }
 
 .file-info {
   display: flex;
@@ -261,6 +332,12 @@ body, html {
   padding: 16px;
 }
 
+/* The image matters more than the cheat sheet — collapse the info panel
+   before the viewer gets squeezed unusable. */
+@media (max-width: 899px) {
+  .info-panel { display: none; }
+}
+
 .panel-section {
   margin-bottom: 24px;
 }
@@ -287,7 +364,7 @@ body, html {
 
 .shortcut-key {
   font-weight: bold;
-  color: var(--accent-color);
+  color: var(--accent-text);
 }
 
 /* Compact type filter inside the sort-controls row */
@@ -491,12 +568,13 @@ body, html {
 .btn-primary {
   width: 100%;
   padding: 8px;
-  background: var(--primary-color);
+  background: var(--primary-strong);
   border: none;
   color: white;
   border-radius: 4px;
   cursor: pointer;
 }
+.btn-primary:hover { background: #1d4ed8; }
 
 .btn-secondary {
   width: 100%;
@@ -549,12 +627,57 @@ body, html {
   overflow-y: auto;
 }
 
+/* Options modal: assigned hotkeys as rows, free keys as a compact keycap
+   grid — assigned state is scannable without reading 26 "Not set" lines. */
 .hotkey-edit-list {
+  margin-bottom: 24px;
+}
+
+.hotkey-counter {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+
+.hotkey-row {
   display: grid;
   grid-template-columns: auto 1fr auto auto;
   gap: 12px;
   align-items: center;
-  margin-bottom: 24px;
+  padding: 4px 0;
+}
+
+.hotkey-row .btn-secondary {
+  width: auto;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.keycap-caption {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 14px 0 6px;
+}
+
+.keycap-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.keycap {
+  min-width: 30px;
+  padding: 5px 7px;
+  background: #2a2a3e;
+  border: 1px solid var(--border-color);
+  color: var(--text-color);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.keycap:hover {
+  border-color: var(--accent-color);
+  color: var(--accent-text);
 }
 
 /* Small ✕ button that clears a hotkey assignment (disabled when unset) */
@@ -745,10 +868,11 @@ body, html {
   overflow-y: auto;
 }
 
-/* Toast notifications — neutral panel by default, red only for errors */
+/* Toast notifications — neutral panel by default, red only for errors.
+   Sits above the viewer footer so it never covers the action buttons. */
 #toast {
   position: fixed;
-  bottom: 16px;
+  bottom: 58px;
   left: 50%;
   transform: translateX(-50%);
   max-width: 80%;

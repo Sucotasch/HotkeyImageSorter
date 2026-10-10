@@ -32,12 +32,14 @@ const el = {
   imageList: document.getElementById('image-list-container'),
   mainImage: document.getElementById('main-image'),
   viewport: document.getElementById('image-viewport'),
+  currentFolder: document.getElementById('current-folder'),
   filePath: document.getElementById('current-file-path'),
   fileMeta: document.getElementById('file-meta'),
   infoDimensions: document.getElementById('info-dimensions'),
   infoDate: document.getElementById('info-date'),
   infoSize: document.getElementById('info-size'),
   fileCount: document.getElementById('file-count'),
+  selectionChip: document.getElementById('selection-chip'),
   btnSelectFolder: document.getElementById('btn-select-folder'),
   btnRotate: document.getElementById('btn-rotate'),
   btnCrop: document.getElementById('btn-crop'),
@@ -77,6 +79,62 @@ function anyModalOpen() {
 function fileOpsAllowed() {
   return el.modalSettings.classList.contains('hidden') &&
          el.modalReport.classList.contains('hidden');
+}
+
+// --- Modal focus management (ARIA dialog contract) -------------------------
+
+let lastFocusedEl = null;
+
+function openModal(modal, focusTarget) {
+  lastFocusedEl = document.activeElement;
+  modal.classList.remove('hidden');
+  if (focusTarget) focusTarget.focus();
+}
+
+function closeModal(modal) {
+  modal.classList.add('hidden');
+  if (lastFocusedEl && lastFocusedEl.isConnected) lastFocusedEl.focus();
+  lastFocusedEl = null;
+}
+
+// Keep Tab cycling inside the open modal instead of wandering the page
+// behind it.
+function trapModalTab(e) {
+  const modal = [el.modalSettings, el.modalMetadata, el.modalReport]
+    .find(m => !m.classList.contains('hidden'));
+  if (!modal) return;
+  const focusables = [...modal.querySelectorAll(
+    'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])'
+  )].filter(n => !n.disabled && n.offsetParent !== null);
+  if (!focusables.length) {
+    e.preventDefault();
+    return;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  if (!modal.contains(active) || (e.shiftKey && active === first)) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+// Header row: the open folder is the orientation anchor of the whole app —
+// show it even though switching folders is a secondary action.
+function updateFolderHeader() {
+  const name = state.folder ? basename(state.folder) : '';
+  el.currentFolder.textContent = name || 'No folder selected';
+  el.currentFolder.title = state.folder || '';
+}
+
+// One date format everywhere (footer + metadata modal): pinned ru-RU.
+function formatDateTime(ts) {
+  const date = new Date(ts * 1000);
+  return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' }) + ' ' +
+         date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 }
 
 // --- Config persistence ----------------------------------------------------
@@ -199,6 +257,12 @@ function setupEventListeners() {
   el.filterType.addEventListener('change', (e) => {
     state.filterType = e.target.value;
     applyFilter();
+  });
+
+  // Selection chip = one-click clear
+  el.selectionChip.addEventListener('click', () => {
+    state.selectedPaths.clear();
+    applyRowClasses();
   });
 
   // Cancel the running conversion; created JPGs stay on disk.
@@ -368,13 +432,16 @@ async function selectFolder() {
 }
 
 async function loadFiles(initialLoadPath = null) {
+  updateFolderHeader();
   try {
     state.allImages = await invoke('list_files', { dir: state.folder });
     // The folder changed (or files were moved/edited): prompt badges from the
     // previous listing are stale, so rebuild the cache from scratch.
     promptPaths.clear();
     promptChecked.clear();
-    lastListSignature = '';
+    // null sentinel: the empty list's signature is also '', so resetting to
+    // '' would skip the DOM rebuild (and the empty-state hint).
+    lastListSignature = null;
     rebuildFilterOptions();
     state.images = filterImages();
     sortAndRender(initialLoadPath);
@@ -394,7 +461,7 @@ async function loadFiles(initialLoadPath = null) {
     // Reset like the success path does: a stale signature would make the next
     // successful load of the same folder skip the DOM rebuild (spacer height
     // stays 0 → the list can't scroll).
-    lastListSignature = '';
+    lastListSignature = null;
     rebuildFilterOptions();
     renderList();
     el.fileCount.textContent = '0 images';
@@ -457,7 +524,9 @@ function selectAllOrClear() {
   }
 }
 
-let lastListSignature = '';
+// null (not '') so the very first sortAndRender always builds the DOM —
+// otherwise the empty-folder hint never appears on a fresh start.
+let lastListSignature = null;
 
 function sortAndRender(initialLoadPath = null) {
   state.images.sort((a, b) => compareImages(a, b, state.sort.by, state.sort.dir));
@@ -536,8 +605,11 @@ function schedulePromptCheck() {
         updateMetaCorner();
         // Only re-render when something changed (and never while a rename
         // input is live — the rAF path checks this, the async .then must too).
+        // force: the visible range is unchanged, but the badges inside the
+        // already-rendered rows are not — a plain renderWindow() would early-
+        // return and the ✦ marks would only appear after the next scroll.
         if (promptPaths.size !== before && renamingIndex === -1) {
-          renderWindow();
+          renderWindow(true);
         }
       })
       .catch(() => {});
@@ -566,6 +638,12 @@ function renderList() {
   spacer.className = 'list-spacer';
   spacer.style.height = (state.images.length * ROW_H) + 'px';
   container.appendChild(spacer);
+  if (state.images.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'list-empty';
+    empty.textContent = 'No images in this folder';
+    container.appendChild(empty);
+  }
   container.scrollTop = prevScroll;
   listStart = 0;
   listEnd = 0;
@@ -582,10 +660,10 @@ function computeListRange() {
   );
 }
 
-function renderWindow() {
+function renderWindow(force = false) {
   const container = el.imageList;
   const { start, end } = computeListRange();
-  if (start === listStart && end === listEnd) return;
+  if (!force && start === listStart && end === listEnd) return;
   listStart = start;
   listEnd = end;
 
@@ -624,6 +702,15 @@ function applyRowClasses() {
     row.classList.toggle('active', i === state.currentIndex);
     row.classList.toggle('selected', state.selectedPaths.has(img.path));
   });
+  updateSelectionChip();
+}
+
+// Selection state must be visible without scanning rows; the chip doubles as
+// the one-click "clear" affordance for mouse users.
+function updateSelectionChip() {
+  const n = state.selectedPaths.size;
+  el.selectionChip.classList.toggle('hidden', n === 0);
+  if (n > 0) el.selectionChip.textContent = `${n} selected ✕`;
 }
 
 let windowRaf = null;
@@ -743,11 +830,11 @@ async function selectImage(index) {
   el.mainImage.style.transform = 'scale(1)';
   
   // Update meta info
-  const date = new Date(img.modified * 1000);
-  el.infoDate.textContent = date.toLocaleDateString('ru-RU', { day:'2-digit', month:'2-digit', year:'numeric' }) + ' ' + date.toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit' });
+  el.infoDate.textContent = formatDateTime(img.modified);
   el.infoSize.textContent = formatBytes(img.size);
   el.infoDimensions.textContent = '…px';
   el.fileMeta.classList.remove('hidden');
+  el.filePath.title = img.path;
   // get natural dimensions after load
   el.mainImage.onload = () => {
     el.infoDimensions.textContent = `${el.mainImage.naturalWidth} × ${el.mainImage.naturalHeight} px`;
@@ -771,6 +858,11 @@ async function selectImage(index) {
 
 // Global Keys
 async function handleGlobalKeydown(e) {
+  // Tab stays inside the open modal (ARIA dialog contract).
+  if (e.key === 'Tab' && anyModalOpen()) {
+    trapModalTab(e);
+    return;
+  }
   const active = document.activeElement;
   // In text fields Ctrl+A means "select all text" (rename input), so let the
   // browser handle it there. Everywhere else it selects all visible rows —
@@ -1049,7 +1141,7 @@ function formatSizeMB(bytes) {
 }
 
 function closeReportModal() {
-  el.modalReport.classList.add('hidden');
+  closeModal(el.modalReport);
   el.reportBody.innerHTML = '';
 }
 
@@ -1104,7 +1196,7 @@ function showReportModal(report, total) {
   }
 
   el.reportBody.innerHTML = html;
-  el.modalReport.classList.remove('hidden');
+  openModal(el.modalReport, document.getElementById('btn-close-report'));
 }
 
 async function doConvert() {
@@ -1220,6 +1312,9 @@ function toggleCrop() {
   state.isCropActive = true;
   el.btnCrop.classList.add('active');
   el.cropActions.classList.remove('hidden');
+  // The metadata corner button would sit over Cropper's UI and open a modal
+  // on top of an active crop — hide it for the duration.
+  el.metaCorner.classList.add('hidden');
   cropper = new Cropper(el.mainImage, {
     viewMode: 1,        // crop box confined to the canvas (the image)
     background: false,  // keep the app's dark viewport, no checkerboard
@@ -1238,6 +1333,7 @@ function destroyCropper() {
   state.isCropActive = false;
   el.btnCrop.classList.remove('active');
   el.cropActions.classList.add('hidden');
+  updateMetaCorner();
 }
 
 async function executeCrop() {
@@ -1273,17 +1369,19 @@ function renderShortcuts() {
 }
 
 function toggleSettings() {
-  el.modalSettings.classList.toggle('hidden');
-  if (!el.modalSettings.classList.contains('hidden')) {
+  const closing = !el.modalSettings.classList.contains('hidden');
+  if (closing) {
+    closeModal(el.modalSettings);
+    renderShortcuts();
+    scheduleConfigSave(true);
+  } else {
+    openModal(el.modalSettings, document.getElementById('btn-close-settings'));
     renderSettingsList();
     document.getElementById('toggle-tray').checked = state.config.minimize_to_tray !== false;
     document.getElementById('toggle-convert-replace').checked = state.config.convert_replace === true;
     document.getElementById('toggle-convert-report').checked = state.config.convert_show_report !== false;
     document.getElementById('toggle-context-menu').checked = state.config.context_menu === true;
     el.convertMode.value = state.config.convert_replace ? 'replace' : 'next';
-  } else {
-    renderShortcuts();
-    scheduleConfigSave(true);
   }
 }
 
@@ -1296,7 +1394,7 @@ let metadataRequestSeq = 0;
 async function toggleMetadataModal() {
   const opening = el.modalMetadata.classList.contains('hidden');
   if (!opening) {
-    el.modalMetadata.classList.add('hidden');
+    closeModal(el.modalMetadata);
     // Invalidate any in-flight metadata fetch for the now-hidden modal.
     metadataRequestSeq++;
     return;
@@ -1305,7 +1403,7 @@ async function toggleMetadataModal() {
     notify('No image selected');
     return;
   }
-  el.modalMetadata.classList.remove('hidden');
+  openModal(el.modalMetadata, document.getElementById('btn-close-metadata'));
   await loadMetadata(true);
 }
 
@@ -1342,7 +1440,7 @@ function renderMetadata(meta) {
   const payloadRef = (text) => metaPayloads.push(text) - 1;
 
   // File summary
-  const date = meta.modified ? new Date(meta.modified * 1000).toLocaleString() : '—';
+  const date = meta.modified ? formatDateTime(meta.modified) : '—';
   sections.push(`
     <div class="metadata-section">
       <h3>File</h3>
@@ -1443,50 +1541,83 @@ function renderMetadata(meta) {
 
 function renderSettingsList() {
   el.hotkeyEditList.innerHTML = '';
-  "abcdefghijklmnopqrstuvwxyz".split('').forEach(key => {
-    const row = document.createElement('div');
-    row.style.display = 'contents';
-    const assigned = state.config.hotkeys[key];
-    const currentPath = assigned || 'Not set';
+  const keys = 'abcdefghijklmnopqrstuvwxyz'.split('');
+  const assigned = keys.filter(k => state.config.hotkeys[k]);
+  const unassigned = keys.filter(k => !state.config.hotkeys[k]);
 
-    const kbd = document.createElement('kbd');
-    kbd.textContent = key.toUpperCase();
+  const counter = document.createElement('div');
+  counter.className = 'hotkey-counter';
+  counter.textContent = `${assigned.length} of ${keys.length} assigned`;
+  el.hotkeyEditList.appendChild(counter);
 
-    const span = document.createElement('span');
-    span.textContent = currentPath;
-    span.title = currentPath;
+  // Assigned keys first — the state the user actually maintains.
+  assigned.forEach(key => el.hotkeyEditList.appendChild(hotkeyRow(key)));
 
-    const btn = document.createElement('button');
-    btn.textContent = 'Set';
-    btn.addEventListener('click', async () => {
-      const selected = await open({ directory: true });
-      if (selected) {
-        state.config.hotkeys[key] = selected;
-        renderSettingsList();
-      }
+  // Free keys as a compact grid instead of 21 "Not set" rows.
+  if (unassigned.length) {
+    const caption = document.createElement('div');
+    caption.className = 'keycap-caption';
+    caption.textContent = 'Available keys';
+    el.hotkeyEditList.appendChild(caption);
+
+    const grid = document.createElement('div');
+    grid.className = 'keycap-grid';
+    unassigned.forEach(key => {
+      const keycap = document.createElement('button');
+      keycap.className = 'keycap';
+      keycap.textContent = key.toUpperCase();
+      keycap.title = `Assign a folder to “${key.toUpperCase()}”`;
+      keycap.addEventListener('click', async () => {
+        const selected = await open({ directory: true });
+        if (selected) {
+          state.config.hotkeys[key] = selected;
+          renderSettingsList();
+        }
+      });
+      grid.appendChild(keycap);
     });
+    el.hotkeyEditList.appendChild(grid);
+  }
+}
 
-    row.appendChild(kbd);
-    row.appendChild(span);
-    row.appendChild(btn);
+// One assigned-hotkey row: key, folder, change, clear.
+function hotkeyRow(key) {
+  const row = document.createElement('div');
+  row.className = 'hotkey-row';
 
-    // Clearing an assignment needs its own control — there is no other way
-    // to remove a hotkey once set.
-    const clear = document.createElement('button');
-    clear.className = 'hotkey-clear';
-    clear.textContent = '✕';
-    clear.title = 'Clear this hotkey';
-    clear.disabled = !assigned;
-    clear.addEventListener('click', () => {
-      delete state.config.hotkeys[key];
-      scheduleConfigSave(true);
+  const kbd = document.createElement('kbd');
+  kbd.textContent = key.toUpperCase();
+
+  const path = state.config.hotkeys[key];
+  const span = document.createElement('span');
+  span.textContent = path;
+  span.title = path;
+
+  const change = document.createElement('button');
+  change.className = 'btn-secondary';
+  change.textContent = 'Change';
+  change.addEventListener('click', async () => {
+    const selected = await open({ directory: true });
+    if (selected) {
+      state.config.hotkeys[key] = selected;
       renderSettingsList();
-      renderShortcuts();
-    });
-    row.appendChild(clear);
-
-    el.hotkeyEditList.appendChild(row);
+    }
   });
+
+  const clear = document.createElement('button');
+  clear.className = 'hotkey-clear';
+  clear.textContent = '✕';
+  clear.title = 'Clear this hotkey';
+  clear.setAttribute('aria-label', `Clear hotkey ${key.toUpperCase()}`);
+  clear.addEventListener('click', () => {
+    delete state.config.hotkeys[key];
+    scheduleConfigSave(true);
+    renderSettingsList();
+    renderShortcuts();
+  });
+
+  row.append(kbd, span, change, clear);
+  return row;
 }
 
 init();
