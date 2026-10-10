@@ -151,7 +151,12 @@ body, html {
   overflow: hidden;
 }
 
-.viewport img {
+/* The viewer image. Scoped to the ID on purpose: in crop mode Cropper.js
+   renders its own <img> clones inside .viewport (canvas + in-frame copy) and
+   broad `img` rules leak onto them — the transform transition makes every
+   frame reposition "swim", and the box-shadow makes the two copies read as
+   separate images. Cropper styles its clones via vendor/cropper.min.css. */
+#main-image {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
