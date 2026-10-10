@@ -213,6 +213,7 @@ Settings are stored in a JSON configuration file (location varies by OS):
   "last_file": "/path/to/last/viewed/image.jpg",
   "sort_by": "name",
   "sort_dir": 1,
+  "info_panel_hidden": false,
   "hotkeys": {
     "a": "/path/to/category/a",
     "b": "/path/to/category/b",
@@ -794,6 +795,7 @@ npm run build
   "last_file": "/путь/к/последнему/просмотренному/изображению.jpg",
   "sort_by": "name",
   "sort_dir": 1,
+  "info_panel_hidden": false,
   "hotkeys": {
     "a": "/путь/к/категории/a",
     "b": "/путь/к/категории/b",

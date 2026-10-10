@@ -40,6 +40,7 @@ fn default_config() -> AppConfig {
         convert_replace: Some(false),
         convert_show_report: Some(true),
         context_menu: Some(false),
+        info_panel_hidden: Some(false),
     }
 }
 
@@ -106,6 +107,7 @@ mod tests {
         cfg.convert_replace = Some(true);
         cfg.convert_show_report = Some(false);
         cfg.context_menu = Some(true);
+        cfg.info_panel_hidden = Some(true);
         cfg.last_folder = Some("C:/images".to_string());
 
         save_config_to(&path, &cfg).unwrap();
@@ -118,6 +120,7 @@ mod tests {
         assert_eq!(loaded.convert_replace, cfg.convert_replace);
         assert_eq!(loaded.convert_show_report, cfg.convert_show_report);
         assert_eq!(loaded.context_menu, cfg.context_menu);
+        assert_eq!(loaded.info_panel_hidden, cfg.info_panel_hidden);
         assert_eq!(loaded.last_folder, cfg.last_folder);
     }
 

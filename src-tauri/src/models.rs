@@ -36,6 +36,10 @@ pub struct AppConfig {
     /// registry. Default: off.
     #[serde(default)]
     pub context_menu: Option<bool>,
+    /// The right info panel (shortcuts + commands) hidden by the user
+    /// (footer toggle button / Ctrl+B). Default: shown.
+    #[serde(default)]
+    pub info_panel_hidden: Option<bool>,
 }
 
 /// A single metadata key/value pair (EXIF field, PNG text chunk, ...).

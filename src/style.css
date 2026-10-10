@@ -338,6 +338,16 @@ body, html {
   .info-panel { display: none; }
 }
 
+/* User toggle (footer button / Ctrl+B). The <900px media query above hides
+   the panel regardless at narrow widths. */
+body.info-hidden .info-panel { display: none; }
+
+#btn-toggle-info {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 5px 8px;
+}
+
 .panel-section {
   margin-bottom: 24px;
 }

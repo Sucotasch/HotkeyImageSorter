@@ -60,7 +60,8 @@ const el = {
   metadataBody: document.getElementById('metadata-body'),
   metaCorner: document.getElementById('btn-meta-corner'),
   modalReport: document.getElementById('modal-report'),
-  reportBody: document.getElementById('report-body')
+  reportBody: document.getElementById('report-body'),
+  btnToggleInfo: document.getElementById('btn-toggle-info')
 };
 
 // True when any modal is open (settings, metadata or conversion report). Used
@@ -231,8 +232,25 @@ async function init() {
   if (state.config.context_menu === true) {
     document.getElementById('toggle-context-menu').checked = true;
   }
-  
+  applyInfoPanel(state.config.info_panel_hidden === true);
+
   updateHistoryStats();
+}
+
+// The right info panel (shortcuts + commands) is the user's to reclaim: one
+// footer button flips the state, naming the ACTION it performs (▸ hides,
+// ◂ shows). Persisted via config.info_panel_hidden.
+function applyInfoPanel(hidden) {
+  document.body.classList.toggle('info-hidden', hidden);
+  el.btnToggleInfo.textContent = hidden ? '◂' : '▸';
+  el.btnToggleInfo.title = hidden ? 'Show info panel (Ctrl+B)' : 'Hide info panel (Ctrl+B)';
+}
+
+function toggleInfoPanel() {
+  const hidden = !document.body.classList.contains('info-hidden');
+  applyInfoPanel(hidden);
+  state.config.info_panel_hidden = hidden;
+  scheduleConfigSave(true);
 }
 
 function setupEventListeners() {
@@ -264,6 +282,9 @@ function setupEventListeners() {
     state.selectedPaths.clear();
     applyRowClasses();
   });
+
+  // Info panel toggle (also Ctrl+B)
+  el.btnToggleInfo.addEventListener('click', toggleInfoPanel);
 
   // Cancel the running conversion; created JPGs stay on disk.
   el.btnCancelConvert.addEventListener('click', () => {
@@ -1000,6 +1021,9 @@ async function handleGlobalKeydown(e) {
   } else if (e.ctrlKey && (code === 'KeyX' || key === 'x') && !anyModalOpen()) {
     e.preventDefault();
     await doRedo();
+  } else if (e.ctrlKey && (code === 'KeyB' || key === 'b') && !anyModalOpen()) {
+    e.preventDefault();
+    toggleInfoPanel();
   } else if ((key === 'enter' || code === 'Enter') && !(active && active.tagName === 'BUTTON') && !anyModalOpen()) {
     e.preventDefault();
     if (state.isCropActive) {

@@ -32,7 +32,7 @@ This file gives Freebuff context about your project: goals, commands, convention
 ## Conventions
 - Rust: standard `#[tauri::command]` async fns returning `Result<T, String>`; `use tauri::State` for shared state; commands snake_case (e.g. `move_images`, `trash_images`, `get_history_stats`, `get_metadata`, `copy_text`, `check_prompts`).
 - JS: vanilla ES modules, `const { invoke } = window.__TAURI__.core;`, global `state` object, `const el = { ... }` UI-element cache, camelCase helpers.
-- Config is saved wholesale via `save_config` with the full `AppConfig` object (has `#[serde(default)]` on all fields — keep fields backward compatible).
+- **Config is saved wholesale via `save_config` with the full `AppConfig` object (has `#[serde(default)]` on all fields — keep fields backward compatible). UI-persisted prefs: `info_panel_hidden` (right panel toggle, footer button / Ctrl+B).**
 - History: undo/redo stored as batches; capped at **10 batches** in `lib.rs` (old `edit` backups deleted when evicted). `UndoActionType` is an enum: `Move` | `Edit` (rename is NOT undoable — known limitation).
 - Modal handling, two levels: `anyModalOpen()` (settings OR metadata OR report) gates viewer hotkeys (Ctrl+R/J/C/Z/X, Enter, Ctrl+A); file-op hotkeys (Delete, A–Z moves) use `fileOpsAllowed()` — blocked by the settings and report modals, deliberately still active behind the metadata modal (triage-by-prompt workflow). New modals must join both guards.
 
