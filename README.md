@@ -362,6 +362,7 @@ Moves image to system trash (configurable in settings).
 | `Ctrl+C` | Toggle crop mode |
 | `Ctrl+Q` | Image metadata viewer (EXIF / AI prompt / copy / export) |
 | `Ctrl+J` | Convert selected PNGs to JPG (with metadata) |
+| `Ctrl+B` | Toggle the right info panel (shortcuts & commands) |
 | `Mouse Wheel` | Zoom in/out |
 | `Ctrl+0` | Reset zoom |
 
@@ -944,6 +945,7 @@ Delete
 | `Ctrl+C` | Переключить режим обрезки |
 | `Ctrl+Q` | Просмотр метаданных (EXIF / AI-промпт / копирование / экспорт) |
 | `Ctrl+J` | Конвертация выбранных PNG в JPG (с метаданными) |
+| `Ctrl+B` | Показать/скрыть правую панель (шорткаты и команды) |
 | `Колесо мыши` | Масштабирование |
 | `Ctrl+0` | Сброс масштаба |
 
