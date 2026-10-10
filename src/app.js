@@ -1,4 +1,4 @@
-import { basename, escapeHtml, computeResizeRect, computeVisibleRange, compareImages, formatBytes } from './utils.js';
+import { basename, escapeHtml, computeVisibleRange, compareImages, formatBytes } from './utils.js';
 
 const { invoke } = window.__TAURI__.core;
 const { open } = window.__TAURI__.dialog;
@@ -22,14 +22,16 @@ let state = {
 
 let currentZoom = 1;
 
-// Crop region tracked in image-fraction coordinates (0..1) so it survives
-// zoom, navigation and window resizes without leaving the image.
-let cropFrac = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
+// Crop mode state: while active, a Cropper.js instance owns the image —
+// the crop box is constrained to the image (viewMode 1), wheel-zooms to the
+// cursor, and getData() returns exact natural-pixel coordinates.
+let cropper = null;
 
 // UI Elements
 const el = {
   imageList: document.getElementById('image-list-container'),
   mainImage: document.getElementById('main-image'),
+  viewport: document.getElementById('image-viewport'),
   filePath: document.getElementById('current-file-path'),
   fileMeta: document.getElementById('file-meta'),
   infoDimensions: document.getElementById('info-dimensions'),
@@ -47,11 +49,11 @@ const el = {
   convertProgressText: document.getElementById('convert-progress-text'),
   btnCancelConvert: document.getElementById('btn-cancel-convert'),
   shortcutLegend: document.getElementById('shortcut-legend'),
-  cropOverlay: document.getElementById('crop-overlay'),
-  cropRegion: document.getElementById('crop-region'),
+  cropActions: document.getElementById('crop-actions'),
+  btnCropApply: document.getElementById('btn-crop-apply'),
+  btnCropCancel: document.getElementById('btn-crop-cancel'),
   modalSettings: document.getElementById('modal-settings'),
   hotkeyEditList: document.getElementById('hotkey-edit-list'),
-  cropLabel: document.getElementById('crop-label'),
   modalMetadata: document.getElementById('modal-metadata'),
   metadataBody: document.getElementById('metadata-body'),
   metaCorner: document.getElementById('btn-meta-corner'),
@@ -259,25 +261,14 @@ function setupEventListeners() {
     e.preventDefault();
     applyZoom(e.deltaY);
   }, { passive: false });
-  // While crop is active the dark overlay covers the image, so it must forward
-  // wheel events to zoom as well (the region stays glued via cropFrac).
-  el.cropOverlay.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    applyZoom(e.deltaY);
-  }, { passive: false });
+  // While crop is active Cropper owns the image (the original <img> is
+  // hidden), including its own wheel zoom — nothing to forward here.
 
-  // Reposition the crop region whenever the image (re)loads — covers
-  // navigation, rotate, crop and undo/redo refreshes uniformly.
-  el.mainImage.addEventListener('load', () => {
-    if (state.isCropActive) positionCropRegion();
-  });
-
-  // Keep the crop region glued to the image when the window is resized
   window.addEventListener('resize', () => {
-    if (state.isCropActive) positionCropRegion();
+    // Cropper handles its own re-layout while active (responsive: true).
     scheduleRenderWindow();
   });
-  
+
   // Virtual list: re-render the window on scroll
   el.imageList.addEventListener('scroll', () => scheduleRenderWindow(), { passive: true });
 
@@ -322,12 +313,16 @@ function setupEventListeners() {
   el.mainImage.addEventListener('dblclick', toggleFullscreen);
   el.filePath.addEventListener('dblclick', toggleFullscreen);
 
-  // Crop Interaction
-  setupCropDrag();
-  el.cropRegion.addEventListener('dblclick', (e) => {
-    if (e.target.classList.contains('crop-handle')) return;
+  // Crop (Cropper.js): confirm on double-click inside the selection (not on
+  // its resize points), or via the buttons; Esc/Cancel destroy the cropper.
+  el.viewport.addEventListener('dblclick', (e) => {
+    if (!state.isCropActive) return;
+    if (e.target.closest('.cropper-point')) return;
+    if (!e.target.closest('.cropper-crop-box')) return;
     executeCrop();
   });
+  el.btnCropApply.addEventListener('click', () => executeCrop());
+  el.btnCropCancel.addEventListener('click', () => toggleCrop());
 }
 
 function updateSortButtonUI() {
@@ -915,7 +910,12 @@ async function handleGlobalKeydown(e) {
     await doRedo();
   } else if ((key === 'enter' || code === 'Enter') && !(active && active.tagName === 'BUTTON') && !anyModalOpen()) {
     e.preventDefault();
-    await toggleFullscreen();
+    if (state.isCropActive) {
+      // Enter confirms the crop; Esc (handled above) cancels it.
+      await executeCrop();
+    } else {
+      await toggleFullscreen();
+    }
   } else if (code && code.startsWith('Key') && !e.ctrlKey && !e.metaKey && !e.altKey && fileOpsAllowed()) {
     const char = code.replace('Key', '').toLowerCase();
     const targetDir = state.config.hotkeys[char];
@@ -1164,9 +1164,13 @@ async function doConvert() {
 }
 
 function refreshCurrentImage() {
-  // Add cache buster to URL
-  const src = window.__TAURI__.core.convertFileSrc(state.currentPath);
-  el.mainImage.src = src + '?t=' + Date.now();
+  // Cache buster: the same URL can be served from the webview cache after a
+  // rotate/crop/undo, making the edit invisible.
+  const src = window.__TAURI__.core.convertFileSrc(state.currentPath) + '?t=' + Date.now();
+  el.mainImage.src = src;
+  // While crop is active Cropper renders its own copy of the image — feed it
+  // the fresh frame too (rotate/undo during crop stay live).
+  if (cropper) cropper.replace(src);
 }
 
 // Toggle native window fullscreen (dbl-click image/file name, or Enter)
@@ -1188,196 +1192,71 @@ async function isFullscreenActive() {
   }
 }
 
-// Crop Logic
+// Crop Logic (Cropper.js)
 
-// Displayed image rectangle in viewport coordinates (includes zoom transform)
-function imageRect() {
-  return el.mainImage.getBoundingClientRect();
-}
-
-// Wheel zoom; also keeps the crop region glued to the image when active.
 function applyZoom(deltaY) {
   if (deltaY < 0) currentZoom = Math.min(10, currentZoom + 0.1);
   else currentZoom = Math.max(0.1, currentZoom - 0.1);
   el.mainImage.style.transform = `scale(${currentZoom})`;
-  if (state.isCropActive) positionCropRegion();
 }
 
-// Position the region from cropFrac, keeping it inside the current image rect.
-// The overlay does not start at window (0,0) (the sidebar shifts it), so the
-// window-space rect is converted into overlay coordinates before styling.
-function positionCropRegion() {
-  const img = imageRect();
-  if (!(img.width > 0 && img.height > 0)) return;
-  const ov = el.cropOverlay.getBoundingClientRect();
-  el.cropRegion.style.left = (img.left - ov.left + cropFrac.x * img.width) + 'px';
-  el.cropRegion.style.top = (img.top - ov.top + cropFrac.y * img.height) + 'px';
-  el.cropRegion.style.width = (cropFrac.w * img.width) + 'px';
-  el.cropRegion.style.height = (cropFrac.h * img.height) + 'px';
-  updateCropLabel();
-}
-
-// Record the region's position relative to the displayed image (0..1)
-function captureCropFrac() {
-  const img = imageRect();
-  if (!(img.width > 0 && img.height > 0)) return;
-  const r = el.cropRegion.getBoundingClientRect();
-  cropFrac.x = (r.left - img.left) / img.width;
-  cropFrac.y = (r.top - img.top) / img.height;
-  cropFrac.w = r.width / img.width;
-  cropFrac.h = r.height / img.height;
-}
-
-// Clamp a viewport-space rect (fixed size, e.g. when moving the region) so it
-// stays fully inside the image.
-function applyCropClamp(left, top, width, height) {
-  const img = imageRect();
-  if (!(img.width > 0 && img.height > 0)) return { left, top, width, height };
-  width = Math.min(width, img.width);
-  height = Math.min(height, img.height);
-  left = Math.max(img.left, Math.min(left, img.right - width));
-  top = Math.max(img.top, Math.min(top, img.bottom - height));
-  return { left, top, width, height };
-}
-
-// Live readout of the crop size in image pixels
-function updateCropLabel() {
-  if (!el.cropLabel) return;
-  const img = imageRect();
-  if (!(img.width > 0 && img.height > 0) || !el.mainImage.naturalWidth) return;
-  const scaleX = img.width / el.mainImage.naturalWidth;
-  const r = el.cropRegion.getBoundingClientRect();
-  const w = Math.round(r.width / scaleX);
-  const h = Math.round(r.height / scaleX);
-  el.cropLabel.textContent = `Double-click to crop — ${w} × ${h} px`;
-}
-
+// Enters crop mode: Cropper takes over the displayed image (the original
+// <img> is hidden and re-rendered inside a constrained canvas). The crop box
+// can never leave the image (viewMode 1), wheel-zoom goes to the cursor, and
+// there is no native text selection to leak into the side panels.
 function toggleCrop() {
-  state.isCropActive = !state.isCropActive;
-  el.cropOverlay.classList.toggle('hidden', !state.isCropActive);
-  el.btnCrop.classList.toggle('active', state.isCropActive);
   if (state.isCropActive) {
-    // Center a 300px box on the actual image (not the viewport)
-    const img = imageRect();
-    if (!(img.width > 0 && img.height > 0)) return; // image not loaded yet
-    const size = 300;
-    const w = Math.min(size, img.width);
-    const h = Math.min(size, img.height);
-    cropFrac = {
-      x: (img.width - w) / 2 / img.width,
-      y: (img.height - h) / 2 / img.height,
-      w: w / img.width,
-      h: h / img.height,
-    };
-    positionCropRegion();
+    destroyCropper();
+    return;
   }
+  if (!state.currentPath) {
+    notify('No image selected');
+    return;
+  }
+  if (!el.mainImage.complete || !el.mainImage.naturalWidth) {
+    notify('Image is still loading — try again in a moment');
+    return;
+  }
+  state.isCropActive = true;
+  el.btnCrop.classList.add('active');
+  el.cropActions.classList.remove('hidden');
+  cropper = new Cropper(el.mainImage, {
+    viewMode: 1,        // crop box confined to the canvas (the image)
+    background: false,  // keep the app's dark viewport, no checkerboard
+    autoCropArea: 0.5,  // like the old centered box, relative to the image
+    movable: true,      // drag the image to fine-position the frame
+    zoomOnWheel: true,
+    responsive: true,   // re-layout on window resize
+  });
 }
 
-function setupCropDrag() {
-  let isDragging = false;
-  let startX, startY;
-  const MIN_SIZE = 20;
-
-  el.cropRegion.addEventListener('mousedown', (e) => {
-    if (e.target.classList.contains('crop-handle')) return;
-    if (e.button !== 0) return;
-    const rect = el.cropRegion.getBoundingClientRect();
-    startX = e.clientX - rect.left;
-    startY = e.clientY - rect.top;
-    isDragging = true;
-  });
-
-  window.addEventListener('mousemove', (e) => {
-    if (!isDragging) return;
-    const ov = el.cropOverlay.getBoundingClientRect();
-    const clamped = applyCropClamp(
-      e.clientX - startX,
-      e.clientY - startY,
-      el.cropRegion.offsetWidth,
-      el.cropRegion.offsetHeight
-    );
-    el.cropRegion.style.left = (clamped.left - ov.left) + 'px';
-    el.cropRegion.style.top = (clamped.top - ov.top) + 'px';
-    captureCropFrac();
-    updateCropLabel();
-  });
-
-  window.addEventListener('mouseup', () => isDragging = false);
-
-  // Handle resizing: corners (nw/ne/sw/se) and edges (n/s/e/w)
-  const handles = el.cropRegion.querySelectorAll('.crop-handle');
-  handles.forEach(h => {
-    h.addEventListener('mousedown', (e) => {
-      e.stopPropagation();
-      if (e.button !== 0) return;
-      const handleClass = e.target.classList[1]; // nw, ne, sw, se, n, s, e, w
-      const startX = e.clientX;
-      const startY = e.clientY;
-      const startW = el.cropRegion.offsetWidth;
-      const startH = el.cropRegion.offsetHeight;
-      const startRect = el.cropRegion.getBoundingClientRect();
-      const startL = startRect.left; // window coords, matches applyCropClamp
-      const startT = startRect.top;
-
-      const onMouseMove = (me) => {
-        const dx = me.clientX - startX;
-        const dy = me.clientY - startY;
-        const img = imageRect();
-        if (!(img.width > 0 && img.height > 0)) return;
-        const ov = el.cropOverlay.getBoundingClientRect();
-        const clamped = computeResizeRect(
-          img,
-          { left: startL, top: startT, width: startW, height: startH },
-          dx,
-          dy,
-          handleClass,
-          MIN_SIZE
-        );
-        el.cropRegion.style.width = clamped.width + 'px';
-        el.cropRegion.style.height = clamped.height + 'px';
-        el.cropRegion.style.left = (clamped.left - ov.left) + 'px';
-        el.cropRegion.style.top = (clamped.top - ov.top) + 'px';
-        captureCropFrac();
-        updateCropLabel();
-      };
-
-      const onMouseUp = () => {
-        window.removeEventListener('mousemove', onMouseMove);
-        window.removeEventListener('mouseup', onMouseUp);
-      };
-
-      window.addEventListener('mousemove', onMouseMove);
-      window.addEventListener('mouseup', onMouseUp);
-    });
-  });
+function destroyCropper() {
+  if (cropper) {
+    cropper.destroy();
+    cropper = null;
+  }
+  state.isCropActive = false;
+  el.btnCrop.classList.remove('active');
+  el.cropActions.classList.add('hidden');
 }
 
 async function executeCrop() {
-  const imgRect = el.mainImage.getBoundingClientRect();
-  const regionRect = el.cropRegion.getBoundingClientRect();
-
-  // getBoundingClientRect already includes the zoom transform, so this scale
-  // (image pixels per displayed pixel) is correct at any currentZoom.
-  const scale = imgRect.width / el.mainImage.naturalWidth;
-  if (!(scale > 0)) return;
-
-  const x = Math.round((regionRect.left - imgRect.left) / scale);
-  const y = Math.round((regionRect.top - imgRect.top) / scale);
-  const w = Math.round(regionRect.width / scale);
-  const h = Math.round(regionRect.height / scale);
-
-  const finalX = Math.max(0, Math.min(x, el.mainImage.naturalWidth - 1));
-  const finalY = Math.max(0, Math.min(y, el.mainImage.naturalHeight - 1));
-  const finalW = Math.max(1, Math.min(w, el.mainImage.naturalWidth - finalX));
-  const finalH = Math.max(1, Math.min(h, el.mainImage.naturalHeight - finalY));
+  if (!cropper) return;
+  // getData(true) returns rounded coordinates in natural image pixels —
+  // no scale math, exact regardless of zoom or device pixel ratio.
+  const d = cropper.getData(true);
+  const finalX = Math.max(0, d.x);
+  const finalY = Math.max(0, d.y);
+  const finalW = Math.max(1, d.width);
+  const finalH = Math.max(1, d.height);
 
   try {
     await invoke('crop_image', { path: state.currentPath, x: finalX, y: finalY, width: finalW, height: finalH });
   } catch (err) {
     notify("Crop failed: " + err);
-    return; // keep the crop region active so the user can retry
+    return; // keep the cropper active so the user can retry
   }
-  toggleCrop();
+  destroyCropper();
   refreshCurrentImage();
   updateHistoryStats();
 }

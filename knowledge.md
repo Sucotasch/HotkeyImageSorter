@@ -7,14 +7,15 @@ This file gives Freebuff context about your project: goals, commands, convention
 - **Setup**: `npm install` (only `@tauri-apps/cli` as devDep; runtime plugins: dialog, single-instance, window-state).
 - **Dev**: `npm run dev` (runs `tauri dev`)
 - **Build**: `npm run build` (runs `tauri build`)
-- **Test**: `cd src-tauri && cargo test` (122 Rust tests) · `npm test` (31 JS tests, `node --test test/*.test.js`, needs Node ≥ 21)
+- **Test**: `cd src-tauri && cargo test` (122 Rust tests) · `npm test` (24 JS tests, `node --test test/*.test.js`, needs Node ≥ 21)
 - **Native build note**: `cargo build` compiles `dav1d-sys` (vendored, AVIF decode) and `turbojpeg-sys` (vendored libjpeg-turbo, lossless JPEG rotation). Both need MSVC + nasm + cmake + pkg-config + meson/ninja (see below). First build takes a few minutes.
 
 ## Architecture
 - **Frontend (`src/`)**: No bundler. `tauri.conf.json` → `frontendDist: "../src"` serves the folder directly. `index.html` loads only `app.js` as an ES module. Exactly four files: `index.html`, `app.js`, `utils.js`, `style.css`.
   - `index.html` — layout: sidebar image list (virtualized), main viewer, right shortcuts panel, settings modal, metadata modal (Ctrl+Q)
-  - `app.js` — ALL app logic: state, virtualized list rendering, keyboard handling, hotkey moves, crop UI, settings, metadata modal, prompt badges, debounced config saves (`scheduleConfigSave`)
-  - `utils.js` — pure helpers (no Tauri): `basename`, `escapeHtml`, `formatBytes`, `computeResizeRect` (crop), `computeVisibleRange` (virtual list) — unit-tested in `test/`
+  - `app.js` — ALL app logic: state, virtualized list rendering, keyboard handling, hotkey moves, crop UI (via vendored Cropper.js), settings, metadata modal, prompt badges, debounced config saves (`scheduleConfigSave`)
+  - `utils.js` — pure helpers (no Tauri): `basename`, `escapeHtml`, `formatBytes`, `computeVisibleRange` (virtual list) — unit-tested in `test/`
+  - `vendor/` — bundled Cropper.js v1 (MIT): `cropper.min.js` + `cropper.min.css`, loaded via plain script/link tags. Owns the image in crop mode (viewMode 1 keeps the crop box inside the image); `cropper.replace()` re-feeds the image after rotate/undo while crop is open.
   - `style.css` — the real styles (dark theme, CSS vars in `:root`)
 - **Backend (`src-tauri/src/`)**: commands registered in `lib.rs` via `invoke_handler`; frontend calls them through `window.__TAURI__.core.invoke(...)` (global Tauri API, `withGlobalTauri: true` — NOT npm imports).
   - `lib.rs` — command registration, undo/redo history (in-memory `AppState` Mutexes), tray icon + minimize-to-tray on close, single-instance, backup/session lifecycle, `get_metadata`/`copy_text`/`check_prompts`
@@ -43,6 +44,7 @@ This file gives Freebuff context about your project: goals, commands, convention
 - **Tray behavior**: closing the window hides to tray (config `minimize_to_tray`, default `true`). Real quit is via tray menu → Quit. `Escape` with no modal open calls `hide_window`.
 - **Config location**: portable `config.json` next to the exe unless running from Program Files; otherwise `%APPDATA%\com\imagesorter\app\config.json`.
 - **Undo/redo is session-only** — history resets on restart. Edit backups live in the session dir under `%TEMP%` (cleaned on window Destroyed; stale dirs cleaned at startup). Backups are on **C:** while images are usually on D:/E/F/G — `swap_edit` copies cross-volume.
+- **Crop mode**: Ctrl+C toggles a vendored Cropper.js instance over the displayed image; while it is active Cropper owns wheel-zoom/pan (the original `<img>` is hidden), Enter or double-click inside the selection applies the crop (`getData(true)` → natural pixels), Esc cancels. `refreshCurrentImage` must call `cropper.replace(src)` when a cropper is open, or rotate/undo won't be visible until it closes. Enter with no crop toggles fullscreen (unchanged).
 - **Sorting**: by `name`/`modified`/`size` with dir saved in config; dates formatted with `ru-RU` locale in `selectImage`.
 - **Windows dev**: needs WebView2 (usually preinstalled) + VS Build Tools (C++ workload). Linux needs webkit2gtk-4.1 dev packages (see README).
 - **Native build gotchas (Windows)**: `src-tauri/vendor/dav1d-sys` is a patched copy of dav1d-sys 0.8.3 (`[patch.crates-io]`). Its `build.rs` finds `vcvars64.bat`, builds dav1d with **MSVC cl** (MinGW-built libdav1d.a won't link), disables tools/tests (windres breaks on paths with spaces). `turbojpeg-sys` needs **cmake + nasm**. Tool binaries: nasm (`D:\c\Tools\nasm\nasm-3.02`), pkg-config-lite (`D:\c\Tools\pkgconfig\pkg-config-lite-0.28-1\bin`), meson+ninja pip (`D:\Works\Python\Scripts`). The repo's bash maps `/c/` to `d:\c\`. CI installs `meson ninja-build nasm pkg-config cmake` on ubuntu.

@@ -293,10 +293,13 @@ Rotates image 90° clockwise. Changes are saved to the original file.
 ##### Crop
 ```
 1. Press Ctrl+C to activate crop mode
-2. Drag crop region to desired area
-3. Double-click to execute crop
-4. Press Ctrl+C again to cancel
+2. Drag/resize the selection — it never leaves the image bounds
+   (mouse wheel zooms toward the cursor, drag pans the image)
+3. Double-click the selection (or Enter / "Apply crop") to execute
+4. Esc / Ctrl+C / "Cancel" aborts
 ```
+
+The crop UI is powered by the bundled [Cropper.js](https://github.com/fengyuanchen/cropperjs) v1 (MIT, vendored in `src/vendor/`).
 
 ##### Zoom
 ```
@@ -871,10 +874,13 @@ Ctrl+R или Ctrl+Shift+R
 ##### Обрезка
 ```
 1. Нажмите Ctrl+C для активации режима обрезки
-2. Перетащите область обрезки в нужное место
-3. Двойной клик для выполнения обрезки
-4. Нажмите Ctrl+C снова для отмены
+2. Перетащите/растяните область — рамка никогда не выходит за пределы
+   изображения (колесо мыши — зум к курсору, перетаскивание — панорамирование)
+3. Двойной клик по выделению (или Enter / «Apply crop») для выполнения
+4. Esc / Ctrl+C / «Cancel» для отмены
 ```
+
+Интерфейс обрезки построен на библиотеке [Cropper.js](https://github.com/fengyuanchen/cropperjs) v1 (MIT, вендорена в `src/vendor/`).
 
 ##### Масштабирование
 ```

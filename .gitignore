@@ -37,3 +37,6 @@ _sort_probe.mjs
 
 # Local image data inside the repo tree (never commit)
 PNG/
+
+# Agent-tooling files (not project code)
+.agents/
