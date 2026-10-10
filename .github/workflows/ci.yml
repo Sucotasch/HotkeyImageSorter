@@ -22,7 +22,10 @@ jobs:
           # libjpeg-turbo is built from source by turbojpeg-sys (lossless JPEG
           # rotation) and needs cmake + nasm
           sudo apt-get install -y meson ninja-build nasm pkg-config cmake
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to the dev machine's Rust so CI doesn't turn red every time a
+      # new clippy release adds lints under -D warnings. Bump this together
+      # with the local toolchain.
+      - uses: dtolnay/rust-toolchain@1.93.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2

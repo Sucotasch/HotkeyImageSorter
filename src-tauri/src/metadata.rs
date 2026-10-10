@@ -251,13 +251,17 @@ fn decode_utf16(body: &[u8]) -> String {
         return String::new();
     }
     let be_units: Vec<u16> = body[..n * 2]
-        .chunks_exact(2)
-        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_be_bytes(*c))
         .collect();
     let be_str = String::from_utf16(&be_units).unwrap_or_default();
     let le_units: Vec<u16> = body[..n * 2]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     let le_str = String::from_utf16(&le_units).unwrap_or_default();
     // Some writers emit a BOM (U+FEFF) at the start.
@@ -1305,10 +1309,7 @@ fn push_fragment(fragments: &mut Vec<String>, s: &str) {
 /// such a fragment is metadata (a model attachment), not a prompt.
 fn is_lora_tag_only(s: &str) -> bool {
     let mut rest = s.trim();
-    loop {
-        let Some(i) = rest.find("<lora:") else {
-            break;
-        };
+    while let Some(i) = rest.find("<lora:") {
         if !rest[..i].trim().is_empty() {
             return false;
         }
