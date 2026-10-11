@@ -388,6 +388,24 @@ body.info-hidden .info-panel { display: none; }
   font-size: 12px;
 }
 
+/* ✦ AI-metadata filter toggle — same glyph as the list badge, active state
+   matches the Crop button so "on" reads the same everywhere. */
+.filter-ai {
+  padding: 4px 8px;
+  background: #2a2a3e;
+  border: 1px solid var(--border-color);
+  color: var(--text-dim);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.filter-ai:hover { color: var(--accent-text); }
+.filter-ai.active {
+  border-color: var(--accent-color);
+  color: var(--accent-text);
+  background: rgba(99, 102, 241, 0.15);
+}
+
 /* Conversion mode switch next to the Convert button */
 .convert-mode {
   padding: 4px 4px;

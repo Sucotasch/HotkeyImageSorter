@@ -17,6 +17,8 @@ let state = {
   selectedPaths: new Set(),
   // '' = all types; otherwise a lowercase extension like 'png'.
   filterType: '',
+  // true = show only images that carry AI generation metadata (✦).
+  filterAI: false,
   isConverting: false
 };
 
@@ -61,7 +63,8 @@ const el = {
   metaCorner: document.getElementById('btn-meta-corner'),
   modalReport: document.getElementById('modal-report'),
   reportBody: document.getElementById('report-body'),
-  btnToggleInfo: document.getElementById('btn-toggle-info')
+  btnToggleInfo: document.getElementById('btn-toggle-info'),
+  filterAI: document.getElementById('filter-ai')
 };
 
 // True when any modal is open (settings, metadata or conversion report). Used
@@ -283,6 +286,16 @@ function setupEventListeners() {
     applyRowClasses();
   });
 
+  // ✦ AI-metadata filter: first enable triggers a folder-wide scan (chunked,
+  // with progress in the counter) — badge data is lazy, the filter needs the
+  // complete picture before the list can be trusted.
+  el.filterAI.addEventListener('click', async () => {
+    if (promptScanRunning) return;
+    setFilterAI(!state.filterAI);
+    if (state.filterAI) await ensurePromptScan();
+    applyFilter();
+  });
+
   // Info panel toggle (also Ctrl+B)
   el.btnToggleInfo.addEventListener('click', toggleInfoPanel);
 
@@ -452,17 +465,27 @@ async function selectFolder() {
   }
 }
 
+// Remembers which folder loadFiles last served, to tell a folder switch
+// (AI filter resets) from a same-folder refresh (filter persists + rescan).
+let lastLoadedFolder = null;
+
 async function loadFiles(initialLoadPath = null) {
   updateFolderHeader();
+  const folderChanged = state.folder !== lastLoadedFolder;
+  lastLoadedFolder = state.folder;
+  // A new folder starts unfiltered: enabling the AI filter means a
+  // folder-wide scan, which must never run implicitly at startup.
+  if (folderChanged) setFilterAI(false);
   try {
     state.allImages = await invoke('list_files', { dir: state.folder });
-    // The folder changed (or files were moved/edited): prompt badges from the
-    // previous listing are stale, so rebuild the cache from scratch.
+    // The folder listing changed (files moved/edited/deleted): prompt badges
+    // from the previous listing are stale, so rebuild the cache from scratch.
     promptPaths.clear();
     promptChecked.clear();
-    // null sentinel: the empty list's signature is also '', so resetting to
-    // '' would skip the DOM rebuild (and the empty-state hint).
     lastListSignature = null;
+    // Filter stayed on across a same-folder refresh (move/delete/convert):
+    // the caches were just cleared, so rescan before filtering.
+    if (state.filterAI) await ensurePromptScan();
     rebuildFilterOptions();
     state.images = filterImages();
     sortAndRender(initialLoadPath);
@@ -514,11 +537,51 @@ function rebuildFilterOptions() {
   el.filterType.value = state.filterType;
 }
 
-// Applies state.filterType to state.allImages, producing the visible list.
+// Applies state.filterType + state.filterAI to state.allImages, producing
+// the visible list. The AI filter requires promptPaths to be complete — the
+// toggle handler runs the full-folder scan before applying.
 function filterImages() {
-  return state.filterType
+  let list = state.filterType
     ? state.allImages.filter(i => i.extension === state.filterType)
     : state.allImages.slice();
+  if (state.filterAI) {
+    list = list.filter(i => promptPaths.has(i.path));
+  }
+  return list;
+}
+
+// AI-metadata filter: visual state of the ✦ toggle.
+function setFilterAI(on) {
+  state.filterAI = on;
+  el.filterAI.classList.toggle('active', on);
+  el.filterAI.setAttribute('aria-pressed', String(on));
+}
+
+// The lazy badge scan only covers the visible window — a folder-wide filter
+// needs the status of every file. Scans in chunks so the UI stays responsive
+// and the counter can show progress; results feed the same promptPaths cache
+// the badges use.
+let promptScanRunning = false;
+async function ensurePromptScan() {
+  const unscanned = state.allImages.map(i => i.path).filter(p => !promptChecked.has(p));
+  if (!unscanned.length || promptScanRunning) return;
+  promptScanRunning = true;
+  const scanFolder = state.folder;
+  const CHUNK = 100;
+  try {
+    for (let i = 0; i < unscanned.length; i += CHUNK) {
+      // Folder changed or the user toggled the filter off mid-scan — stop.
+      if (!state.filterAI || state.folder !== scanFolder) break;
+      const chunk = unscanned.slice(i, i + CHUNK);
+      const found = await invoke('check_prompts', { paths: chunk });
+      found.forEach(p => promptPaths.add(p));
+      chunk.forEach(p => promptChecked.add(p));
+      el.fileCount.textContent = `Scanning ${Math.min(i + CHUNK, unscanned.length)} / ${unscanned.length}…`;
+    }
+  } catch (err) {
+    notify('Metadata scan failed: ' + err);
+  }
+  promptScanRunning = false;
 }
 
 function applyFilter() {
@@ -557,7 +620,9 @@ function sortAndRender(initialLoadPath = null) {
     renderList();
     lastListSignature = signature;
   }
-  el.fileCount.textContent = `${state.images.length} images`;
+  el.fileCount.textContent = state.filterAI
+    ? `${state.images.length} of ${state.allImages.length} images`
+    : `${state.images.length} images`;
   
   if (initialLoadPath) {
       let idx = state.images.findIndex(i => i.path === initialLoadPath);

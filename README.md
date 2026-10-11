@@ -47,6 +47,7 @@
 | **Persistent Config** | Settings saved between sessions (folders, hotkeys, preferences) |
 | **AI Metadata** | Ctrl+Q viewer: EXIF, PNG text chunks (A1111/ComfyUI/InvokeAI prompts & workflows), copy to clipboard |
 | **Prompt Badges** | Lazy ✦ badge on files that carry AI-generation metadata |
+| **AI Metadata Filter** | ✦ toggle in the sidebar: show only images that carry AI generation metadata; folder-wide scan with live progress, combines with the type filter |
 | **Metadata Export** | Export metadata next to the image as `.metadata.json` / `.metadata.txt` from the Ctrl+Q modal |
 | **Lossless JPEG** | 90/180/270° rotation without re-encoding (libjpeg-turbo) |
 | **Metadata-safe edits** | Rotate/crop preserve EXIF, ICC, XMP, comments and PNG prompt chunks |
@@ -65,6 +66,17 @@ The application supports the formats decodable by its image backend:
 - AVIF
 - TIFF/TIF
 - ICO
+
+### Screenshots
+
+| | |
+|---|---|
+| ![Main window](docs/screenshots/main.png) | ![AI metadata filter](docs/screenshots/filter-ai.png) |
+| *Main window — virtualized list, live viewer, hotkey shortcuts* | *✦ filter — only images that carry AI metadata* |
+| ![Metadata viewer](docs/screenshots/metadata.png) | ![Crop mode](docs/screenshots/crop.png) |
+| *Ctrl+Q — AI prompt, negative prompt, parameters, export* | *Crop — constrained to the image, zoom to cursor* |
+| ![Options](docs/screenshots/options.png) | |
+| *Options — hotkey management, app settings* | |
 
 ---
 
@@ -629,6 +641,7 @@ Contributions are welcome! Please read our contributing guidelines before submit
 | **Сохранение конфигурации** | Настройки сохраняются между сеансами (папки, горячие клавиши, предпочтения) |
 | **AI-метаданные** | Просмотр Ctrl+Q: EXIF, PNG-чанки (промпты/workflow A1111/ComfyUI/InvokeAI), копирование в буфер |
 | **Значки промптов** | Ленивый ✦ у файлов с AI-метаданными генерации |
+| **Фильтр AI-метаданных** | Переключатель ✦ в сайдбаре: показать только изображения с AI-метаданными (промпт/workflow); скан всей папки с живым прогрессом, сочетается с фильтром типов |
 | **Экспорт метаданных** | Экспорт метаданных рядом с изображением как `.metadata.json` / `.metadata.txt` из модалки Ctrl+Q |
 | **Lossless JPEG** | Поворот 90/180/270° без перекодирования (libjpeg-turbo) |
 | **Сохранение метаданных** | Поворот/обрезка сохраняют EXIF, ICC, XMP, комментарии и PNG-чанки промптов |
@@ -647,6 +660,17 @@ Contributions are welcome! Please read our contributing guidelines before submit
 - AVIF
 - TIFF/TIF
 - ICO
+
+### Скриншоты
+
+| | |
+|---|---|
+| ![Главное окно](docs/screenshots/main.png) | ![Фильтр AI-метаданных](docs/screenshots/filter-ai.png) |
+| *Главное окно — виртуализированный список, просмотрщик, шорткаты* | *Фильтр ✦ — только изображения с AI-метаданными* |
+| ![Просмотр метаданных](docs/screenshots/metadata.png) | ![Режим обрезки](docs/screenshots/crop.png) |
+| *Ctrl+Q — промпт, негатив, параметры, экспорт* | *Обрезка — рамка не покидает изображение, зум к курсору* |
+| ![Опции](docs/screenshots/options.png) | |
+| *Опции — управление шорткатами и настройки* | |
 
 ---
 
