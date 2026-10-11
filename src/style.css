@@ -128,6 +128,17 @@ body, html {
   gap: 4px;
 }
 
+.virtual-list-wrap {
+  /* Non-scrolling wrapper: loading/empty overlays attach here, so their
+     top:40% is relative to the VISIBLE viewport. As children of the
+     scroller they would scroll away with the content. */
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .virtual-list {
   flex: 1;
   overflow-y: auto;

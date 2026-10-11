@@ -36,6 +36,7 @@ let cropper = null;
 // UI Elements
 const el = {
   imageList: document.getElementById('image-list-container'),
+  imageListWrap: document.querySelector('.virtual-list-wrap'),
   mainImage: document.getElementById('main-image'),
   viewport: document.getElementById('image-viewport'),
   currentFolder: document.getElementById('current-folder'),
@@ -583,7 +584,10 @@ function showListLoading(text) {
     const label = document.createElement('span');
     label.className = 'list-loading-text';
     box.append(spin, label);
-    el.imageList.appendChild(box);
+    // Attach to the non-scrolling wrapper: as a child of the scroll container
+    // the overlay would scroll away with the content and be invisible unless
+    // the list is at the very top.
+    el.imageListWrap.appendChild(box);
   }
   box.querySelector('.list-loading-text').textContent = text;
   el.fileCount.textContent = 'Loading…';
@@ -907,13 +911,18 @@ function renderList() {
   spacer.style.height = (state.images.length * ROW_H) + 'px';
   container.appendChild(spacer);
   if (state.images.length === 0) {
+    // Attach to the wrapper (not the scroller) — see showListLoading.
+    document.getElementById('list-empty')?.remove();
     const empty = document.createElement('div');
+    empty.id = 'list-empty';
     empty.className = 'list-empty';
     // Distinguish an empty folder from filters that match nothing.
     empty.textContent = state.allImages.length > 0
       ? 'No images match the current filters'
       : 'No images in this folder';
-    container.appendChild(empty);
+    el.imageListWrap.appendChild(empty);
+  } else {
+    document.getElementById('list-empty')?.remove();
   }
   container.scrollTop = prevScroll;
   listStart = 0;
