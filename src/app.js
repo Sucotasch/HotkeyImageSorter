@@ -314,6 +314,12 @@ function setupEventListeners() {
   window.__TAURI__.event.listen('open-file', (event) => {
     if (event.payload) openLaunchTarget(event.payload);
   });
+  // Live "found N files" while a large folder/subtree is being listed.
+  window.__TAURI__.event.listen('list-progress', (event) => {
+    if (listLoadActive && typeof event.payload === 'number') {
+      updateListLoading(`Found ${event.payload.toLocaleString('en-US')} files…`);
+    }
+  });
   el.btnSelectFolder.addEventListener('click', selectFolder);
   document.getElementById('btn-config-hotkeys').addEventListener('click', toggleSettings);
   document.getElementById('btn-close-settings').addEventListener('click', toggleSettings);
@@ -560,6 +566,38 @@ async function selectFolder() {
 // (AI filter resets) from a same-folder refresh (filter persists + rescan).
 let lastLoadedFolder = null;
 
+// List loading: the spinner appears synchronously on loadFiles (before any
+// await) so a 25k-folder switch is never a silent freeze, and the backend's
+// list-progress events stream "found N files" into it while walking.
+let loadSeq = 0;
+let listLoadActive = false;
+
+function showListLoading(text) {
+  let box = document.getElementById('list-loading');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'list-loading';
+    box.className = 'list-loading';
+    const spin = document.createElement('div');
+    spin.className = 'spinner';
+    const label = document.createElement('span');
+    label.className = 'list-loading-text';
+    box.append(spin, label);
+    el.imageList.appendChild(box);
+  }
+  box.querySelector('.list-loading-text').textContent = text;
+  el.fileCount.textContent = 'Loading…';
+}
+
+function updateListLoading(text) {
+  const label = document.querySelector('#list-loading .list-loading-text');
+  if (label) label.textContent = text;
+}
+
+function hideListLoading() {
+  document.getElementById('list-loading')?.remove();
+}
+
 async function loadFiles(initialLoadPath = null) {
   updateFolderHeader();
   const folderChanged = state.folder !== lastLoadedFolder;
@@ -567,8 +605,15 @@ async function loadFiles(initialLoadPath = null) {
   // A new folder starts unfiltered: enabling the AI filter means a
   // folder-wide scan, which must never run implicitly at startup.
   if (folderChanged) setFilterAI(false);
+  const seq = ++loadSeq;
+  listLoadActive = true;
+  showListLoading(state.recursive ? 'Scanning subfolders…' : 'Loading…');
   try {
     state.allImages = await invoke('list_files', { dir: state.folder, recursive: state.recursive });
+    // A newer load superseded this one — never touch the UI with stale data.
+    if (seq !== loadSeq) return;
+    listLoadActive = false;
+    hideListLoading();
     // The folder listing changed (files moved/edited/deleted): prompt badges
     // from the previous listing are stale, so rebuild the cache from scratch.
     promptPaths.clear();
@@ -589,6 +634,9 @@ async function loadFiles(initialLoadPath = null) {
       el.metadataBody.innerHTML = '<div class="metadata-noai">No images left.</div>';
     }
   } catch (err) {
+    if (seq !== loadSeq) return;
+    listLoadActive = false;
+    hideListLoading();
     state.allImages = [];
     state.images = [];
     promptPaths.clear();

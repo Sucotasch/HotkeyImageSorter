@@ -1,7 +1,9 @@
 use crate::models::ImageInfo;
 use jwalk::WalkDir;
 use std::path::Path;
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Instant, SystemTime};
 
 /// Extensions accepted by the image list (and enforced on rename so a file
 /// can't be renamed into a format the app no longer lists). Decodable by the
@@ -18,17 +20,41 @@ pub(crate) const SUPPORTED_EXTENSIONS: [&str; 11] = [
 /// returned; otherwise only the first level, as before. Directories are
 /// never listed — the app sorts files, and folder rows would complicate the
 /// hotkey semantics.
-pub fn list_images(dir_path: &str, recursive: bool) -> Vec<ImageInfo> {
+///
+/// `on_progress` receives the number of entries discovered so far, throttled
+/// to ~8 updates per second — the UI shows live progress while a 25k-file
+/// tree is being walked.
+pub fn list_images(
+    dir_path: &str,
+    recursive: bool,
+    on_progress: impl Fn(usize) + Send + Sync + 'static,
+) -> Vec<ImageInfo> {
     let mut images = Vec::new();
 
-    let mut walk = WalkDir::new(dir_path);
+    // Arc'd so the jwalk worker threads and the final report can both call it.
+    let on_progress = Arc::new(on_progress);
+    let discovered = Arc::new(AtomicUsize::new(0));
+    let last_emit_ms = Arc::new(AtomicU64::new(0));
+    let started = Instant::now();
+    let discovered_for_cb = discovered.clone();
+    let last_emit_for_cb = last_emit_ms.clone();
+    let progress_for_cb = on_progress.clone();
+    let mut walk = WalkDir::new(dir_path).process_read_dir(move |_, _, _, children| {
+        discovered_for_cb.fetch_add(children.len(), Ordering::Relaxed);
+        let now_ms = started.elapsed().as_millis() as u64;
+        let last = last_emit_for_cb.load(Ordering::Relaxed);
+        if now_ms >= last + 120
+            && last_emit_for_cb
+                .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            progress_for_cb(discovered_for_cb.load(Ordering::Relaxed));
+        }
+    });
     if !recursive {
         walk = walk.max_depth(1);
     }
-    for entry in walk
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in walk.into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             let path = entry.path();
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -54,6 +80,8 @@ pub fn list_images(dir_path: &str, recursive: bool) -> Vec<ImageInfo> {
             }
         }
     }
+    // Always report the final count — the throttle skips small/fast walks.
+    on_progress(discovered.load(Ordering::Relaxed));
     images
 }
 
@@ -498,14 +526,27 @@ mod tests {
         fs::write(sub.join("deep").join("c.jpg"), b"3").unwrap();
         fs::write(sub.join("notes.txt"), b"skip").unwrap();
 
-        let flat = list_images(dir.path().to_str().unwrap(), false);
+        let flat = list_images(dir.path().to_str().unwrap(), false, |_| {});
         assert_eq!(flat.len(), 1, "non-recursive: only the top level");
         assert_eq!(flat[0].name, "a.png");
 
-        let all = list_images(dir.path().to_str().unwrap(), true);
+        let progress = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let progress_for_cb = progress.clone();
+        let all = list_images(dir.path().to_str().unwrap(), true, move |n| {
+            progress_for_cb.store(n, Ordering::Relaxed)
+        });
+        assert!(
+            progress.load(Ordering::Relaxed) >= 6,
+            "progress must report discovered entries (≥ 6 items incl. dirs), got {}",
+            progress.load(Ordering::Relaxed)
+        );
         let mut names: Vec<&str> = all.iter().map(|i| i.name.as_str()).collect();
         names.sort();
-        assert_eq!(names, vec!["a.png", "b.png", "c.jpg"], "recursive walks the subtree, files only");
+        assert_eq!(
+            names,
+            vec!["a.png", "b.png", "c.jpg"],
+            "recursive walks the subtree, files only"
+        );
     }
 
     #[test]

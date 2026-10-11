@@ -524,11 +524,26 @@ fn cap_redo(redo: &mut Vec<Vec<UndoAction>>) {
 }
 
 #[tauri::command]
-async fn list_files(dir: String, recursive: bool) -> Result<Vec<ImageInfo>, String> {
+async fn list_files(
+    app: tauri::AppHandle,
+    dir: String,
+    recursive: bool,
+) -> Result<Vec<ImageInfo>, String> {
     if !std::path::Path::new(&dir).is_dir() {
         return Err(format!("Folder not found or not a directory: {dir}"));
     }
-    Ok(file_ops::list_images(&dir, recursive))
+    // The walk can take seconds on large trees (25k+ files) — run it on the
+    // blocking pool (it must not stall the async runtime) and stream
+    // discovery progress to the UI via the list-progress event.
+    tauri::async_runtime::spawn_blocking(move || {
+        let handle = app.clone();
+        file_ops::list_images(&dir, recursive, move |n| {
+            let _ = handle.emit("list-progress", n);
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .map(Ok)?
 }
 
 #[tauri::command]
