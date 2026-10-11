@@ -524,11 +524,11 @@ fn cap_redo(redo: &mut Vec<Vec<UndoAction>>) {
 }
 
 #[tauri::command]
-async fn list_files(dir: String) -> Result<Vec<ImageInfo>, String> {
+async fn list_files(dir: String, recursive: bool) -> Result<Vec<ImageInfo>, String> {
     if !std::path::Path::new(&dir).is_dir() {
         return Err(format!("Folder not found or not a directory: {dir}"));
     }
-    Ok(file_ops::list_images(&dir))
+    Ok(file_ops::list_images(&dir, recursive))
 }
 
 #[tauri::command]

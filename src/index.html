@@ -14,6 +14,7 @@
       <div class="sidebar-header">
         <div class="folder-row">
           <span id="current-folder" class="current-folder">No folder selected</span>
+          <button id="filter-recursive" class="filter-recursive" title="Include subfolders" aria-pressed="false" aria-label="Include subfolders">↳</button>
           <button id="btn-select-folder" class="btn-secondary folder-btn">Change…</button>
         </div>
         <div class="sort-controls">
@@ -98,6 +99,7 @@
         <h3>Commands</h3>
         <div class="command-hints">
           <kbd>↑</kbd> <kbd>↓</kbd> Navigate<br>
+          <kbd>Backspace</kbd> Parent Folder<br>
           <kbd>Shift</kbd>+<kbd>↑</kbd> <kbd>↓</kbd> Range Select<br>
           <kbd>Insert</kbd> Toggle Select &amp; Down<br>
           <kbd>Home</kbd> <kbd>End</kbd> First / Last<br>
@@ -109,6 +111,7 @@
           <kbd>Ctrl+A</kbd> Select All (visible)<br>
           <kbd>Ctrl+F</kbd> Search in Names<br>
           <kbd>Ctrl+0</kbd> Reset Zoom<br>
+          <kbd>Ctrl+O</kbd> Open Folder<br>
           <kbd>Ctrl+Z</kbd> Undo / <kbd>Ctrl+X</kbd> Redo<br>
           <kbd>Enter</kbd> Fullscreen<br>
           <kbd>Ctrl+Q</kbd> Image Metadata<br>

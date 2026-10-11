@@ -13,11 +13,19 @@ pub(crate) const SUPPORTED_EXTENSIONS: [&str; 11] = [
     "jpg", "jpeg", "jif", "png", "gif", "webp", "bmp", "tif", "tiff", "ico", "avif",
 ];
 
-pub fn list_images(dir_path: &str) -> Vec<ImageInfo> {
+/// Lists image files in `dir_path`. With `recursive`, the whole subtree is
+/// walked (the ↳ subfolder-scan toggle) and every image's full path is
+/// returned; otherwise only the first level, as before. Directories are
+/// never listed — the app sorts files, and folder rows would complicate the
+/// hotkey semantics.
+pub fn list_images(dir_path: &str, recursive: bool) -> Vec<ImageInfo> {
     let mut images = Vec::new();
 
-    for entry in WalkDir::new(dir_path)
-        .max_depth(1)
+    let mut walk = WalkDir::new(dir_path);
+    if !recursive {
+        walk = walk.max_depth(1);
+    }
+    for entry in walk
         .into_iter()
         .filter_map(|e| e.ok())
     {
@@ -478,6 +486,26 @@ mod tests {
             );
         }
         assert!(src.exists(), "source untouched on rejected names");
+    }
+
+    #[test]
+    fn list_images_recursive_includes_subfolders() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.png"), b"1").unwrap();
+        let sub = dir.path().join("flux");
+        fs::create_dir_all(sub.join("deep")).unwrap();
+        fs::write(sub.join("b.png"), b"2").unwrap();
+        fs::write(sub.join("deep").join("c.jpg"), b"3").unwrap();
+        fs::write(sub.join("notes.txt"), b"skip").unwrap();
+
+        let flat = list_images(dir.path().to_str().unwrap(), false);
+        assert_eq!(flat.len(), 1, "non-recursive: only the top level");
+        assert_eq!(flat[0].name, "a.png");
+
+        let all = list_images(dir.path().to_str().unwrap(), true);
+        let mut names: Vec<&str> = all.iter().map(|i| i.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["a.png", "b.png", "c.jpg"], "recursive walks the subtree, files only");
     }
 
     #[test]

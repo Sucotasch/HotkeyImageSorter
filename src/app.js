@@ -21,6 +21,8 @@ let state = {
   filterAI: false,
   // Lowercase substring for the name search (empty = no name filter).
   filterName: '',
+  // true = list_images walks the whole subtree (↳ subfolder scan).
+  recursive: false,
   isConverting: false
 };
 
@@ -71,7 +73,8 @@ const el = {
   searchRow: document.getElementById('search-row'),
   searchInput: document.getElementById('search-input'),
   btnSearchClear: document.getElementById('btn-search-clear'),
-  infoZoom: document.getElementById('info-zoom')
+  infoZoom: document.getElementById('info-zoom'),
+  filterRecursive: document.getElementById('filter-recursive')
 };
 
 // True when any modal is open (settings, metadata or conversion report). Used
@@ -134,11 +137,53 @@ function trapModalTab(e) {
 }
 
 // Header row: the open folder is the orientation anchor of the whole app —
-// show it even though switching folders is a secondary action.
+// rendered as clickable breadcrumbs (each ancestor navigates to it, the
+// current segment stays text), anchored to the trailing edge so long roots
+// clip on the left while the current segment remains visible.
 function updateFolderHeader() {
-  const name = state.folder ? basename(state.folder) : '';
-  el.currentFolder.textContent = name || 'No folder selected';
   el.currentFolder.title = state.folder || '';
+  el.currentFolder.replaceChildren();
+  if (!state.folder) {
+    const empty = document.createElement('span');
+    empty.className = 'breadcrumb-seg';
+    empty.textContent = 'No folder selected';
+    el.currentFolder.appendChild(empty);
+    return;
+  }
+  const sep = state.folder.includes('\\') ? '\\' : '/';
+  const parts = state.folder.split(/[\\/]/).filter(Boolean);
+  parts.forEach((part, i) => {
+    const path = i === 0
+      ? part + (part.endsWith(':') || parts.length === 1 ? sep : '')
+      : parts.slice(0, i + 1).join(sep);
+    if (i > 0) {
+      const s = document.createElement('span');
+      s.className = 'breadcrumb-sep';
+      s.textContent = sep;
+      el.currentFolder.appendChild(s);
+    }
+    const seg = document.createElement('span');
+    seg.className = 'breadcrumb-seg';
+    seg.textContent = part;
+    if (i < parts.length - 1) {
+      seg.setAttribute('role', 'button');
+      seg.title = path;
+      seg.addEventListener('click', () => {
+        state.folder = path;
+        loadFiles();
+      });
+    }
+    el.currentFolder.appendChild(seg);
+  });
+}
+
+// Parent of a Windows-style path, or null when already at the drive root.
+function parentPath(folder) {
+  const sep = folder.includes('\\') ? '\\' : '/';
+  const parts = folder.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 1) return null;
+  const parent = parts.slice(0, -1).join(sep);
+  return parent.endsWith(':') ? parent + sep : parent;
 }
 
 // One date format everywhere (footer + metadata modal): pinned ru-RU.
@@ -301,6 +346,16 @@ function setupEventListeners() {
     setFilterAI(!state.filterAI);
     if (state.filterAI) await ensurePromptScan();
     applyFilter();
+  });
+
+  // ↳ subfolder scan: changes what "the folder" means, so the list reloads.
+  // The mode itself persists across folder switches (unlike the AI filter,
+  // which resets — a scan must never run implicitly at startup).
+  el.filterRecursive.addEventListener('click', () => {
+    state.recursive = !state.recursive;
+    el.filterRecursive.classList.toggle('active', state.recursive);
+    el.filterRecursive.setAttribute('aria-pressed', String(state.recursive));
+    loadFiles(state.currentPath);
   });
 
   // Info panel toggle (also Ctrl+B)
@@ -513,7 +568,7 @@ async function loadFiles(initialLoadPath = null) {
   // folder-wide scan, which must never run implicitly at startup.
   if (folderChanged) setFilterAI(false);
   try {
-    state.allImages = await invoke('list_files', { dir: state.folder });
+    state.allImages = await invoke('list_files', { dir: state.folder, recursive: state.recursive });
     // The folder listing changed (files moved/edited/deleted): prompt badges
     // from the previous listing are stale, so rebuild the cache from scratch.
     promptPaths.clear();
@@ -1082,6 +1137,15 @@ async function handleGlobalKeydown(e) {
   } else if (code === 'End' || key === 'end') {
     e.preventDefault();
     if (state.images.length > 0) selectImage(state.images.length - 1);
+  } else if (key === 'backspace' || code === 'Backspace') {
+    // Parent folder (plain key — the input guard already returned for text
+    // fields, so Backspace keeps its normal editing behavior there).
+    e.preventDefault();
+    const parent = state.folder && parentPath(state.folder);
+    if (parent) {
+      state.folder = parent;
+      loadFiles();
+    }
   } else if (code === 'Escape' || key === 'escape') {
     e.preventDefault();
     if (state.isCropActive) {
@@ -1186,6 +1250,9 @@ async function handleGlobalKeydown(e) {
     // Full toggle: open the row, or close it (wiping the query) — a repeated
     // Ctrl+F must not just re-focus an already-open field.
     toggleNameSearch();
+  } else if (e.ctrlKey && (code === 'KeyO' || key === 'o') && !anyModalOpen()) {
+    e.preventDefault();
+    selectFolder();
   } else if ((key === 'enter' || code === 'Enter') && !(active && active.tagName === 'BUTTON') && !anyModalOpen()) {
     e.preventDefault();
     if (state.isCropActive) {

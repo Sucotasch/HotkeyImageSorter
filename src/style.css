@@ -67,10 +67,6 @@ body, html {
   flex: 1;
   min-width: 0;
   font-size: 13px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: default;
 }
 
 .btn-secondary.folder-btn {
@@ -78,6 +74,52 @@ body, html {
   flex-shrink: 0;
   padding: 5px 10px;
   font-size: 12px;
+}
+
+/* ↳ subfolder-scan toggle: lives in the folder row because it changes what
+   "the folder" means (top level vs the whole subtree). Active state matches
+   the ✦ filter so "on" reads the same everywhere. */
+.filter-recursive {
+  flex-shrink: 0;
+  padding: 5px 8px;
+  background: #2a2a3e;
+  border: 1px solid var(--border-color);
+  color: var(--text-dim);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.filter-recursive:hover { color: var(--accent-text); }
+.filter-recursive.active {
+  border-color: var(--accent-color);
+  color: var(--accent-text);
+  background: rgba(99, 102, 241, 0.15);
+}
+
+/* Breadcrumbs: current folder split into clickable ancestors. Anchored to
+   the trailing edge so the current segment stays visible while long roots
+   clip on the left. */
+.current-folder {
+  display: flex;
+  justify-content: flex-end;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.breadcrumb-seg {
+  flex-shrink: 0;
+  cursor: default;
+}
+.breadcrumb-sep {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  padding: 0 3px;
+}
+.breadcrumb-seg[role="button"] {
+  cursor: pointer;
+}
+.breadcrumb-seg[role="button"]:hover {
+  color: var(--accent-text);
 }
 
 .sort-controls {

@@ -49,6 +49,7 @@
 | **Prompt Badges** | Lazy ✦ badge on files that carry AI-generation metadata |
 | **AI Metadata Filter** | ✦ toggle in the sidebar: show only images that carry AI generation metadata; folder-wide scan with live progress, combines with the type filter |
 | **Name Search** | Ctrl+F: live substring filter over file names (any part of the name), combines with the type and AI filters |
+| **Subfolder Scan (↳)** | Toggle in the folder header: include the whole subtree in the flat list — sort everything without navigating; **Backspace** goes to the parent folder, folder header shows clickable breadcrumbs |
 | **Metadata Export** | Export metadata next to the image as `.metadata.json` / `.metadata.txt` from the Ctrl+Q modal |
 | **Lossless JPEG** | 90/180/270° rotation without re-encoding (libjpeg-turbo) |
 | **Metadata-safe edits** | Rotate/crop preserve EXIF, ICC, XMP, comments and PNG prompt chunks |
@@ -354,8 +355,8 @@ Moves image to system trash (configurable in settings).
 
 | Shortcut | Action |
 |----------|--------|
-| `←` / `H` | Previous image |
-| `→` / `L` | Next image |
+| `←` / `→` | Previous / next image |
+| `Backspace` | Go to the parent folder |
 | `Home` | First image |
 | `End` | Last image |
 | `Ctrl+O` | Open folder |
@@ -645,6 +646,7 @@ Contributions are welcome! Please read our contributing guidelines before submit
 | **Значки промптов** | Ленивый ✦ у файлов с AI-метаданными генерации |
 | **Фильтр AI-метаданных** | Переключатель ✦ в сайдбаре: показать только изображения с AI-метаданными (промпт/workflow); скан всей папки с живым прогрессом, сочетается с фильтром типов |
 | **Поиск по имени** | Ctrl+F: живой поиск по подстроке в имени файла, сочетается с фильтрами типов и AI-метаданных |
+| **Скан подпапок (↳)** | Переключатель в шапке папки: всё поддерево попадает в плоский список — сортируйте без навигации; **Backspace** — на уровень вверх, в шапке кликабельные крошки |
 | **Экспорт метаданных** | Экспорт метаданных рядом с изображением как `.metadata.json` / `.metadata.txt` из модалки Ctrl+Q |
 | **Lossless JPEG** | Поворот 90/180/270° без перекодирования (libjpeg-turbo) |
 | **Сохранение метаданных** | Поворот/обрезка сохраняют EXIF, ICC, XMP, комментарии и PNG-чанки промптов |
@@ -951,8 +953,8 @@ Delete
 
 | Горячая клавиша | Действие |
 |-----------------|----------|
-| `←` / `H` | Предыдущее изображение |
-| `→` / `L` | Следующее изображение |
+| `←` / `→` | Предыдущее / следующее изображение |
+| `Backspace` | На уровень вверх (родительская папка) |
 | `Home` | Первое изображение |
 | `End` | Последнее изображение |
 | `Ctrl+O` | Открыть папку |
