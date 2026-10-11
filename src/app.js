@@ -1183,7 +1183,9 @@ async function handleGlobalKeydown(e) {
     resetZoom();
   } else if (e.ctrlKey && (code === 'KeyF' || key === 'f') && !anyModalOpen()) {
     e.preventDefault();
-    openNameSearch();
+    // Full toggle: open the row, or close it (wiping the query) — a repeated
+    // Ctrl+F must not just re-focus an already-open field.
+    toggleNameSearch();
   } else if ((key === 'enter' || code === 'Enter') && !(active && active.tagName === 'BUTTON') && !anyModalOpen()) {
     e.preventDefault();
     if (state.isCropActive) {
