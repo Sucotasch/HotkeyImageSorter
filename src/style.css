@@ -406,6 +406,54 @@ body.info-hidden .info-panel { display: none; }
   background: rgba(99, 102, 241, 0.15);
 }
 
+/* Search toggle sits in the sort-controls row; the input itself appears in
+   its own row below (progressive disclosure — the header stays one line). */
+#btn-search {
+  padding: 4px 8px;
+  background: #2a2a3e;
+  border: 1px solid var(--border-color);
+  color: var(--text-dim);
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+#btn-search:hover { color: var(--accent-text); }
+#btn-search.active {
+  border-color: var(--accent-color);
+  color: var(--accent-text);
+}
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.search-row.hidden { display: none; }
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 26px;
+  padding: 0 8px;
+  background: #121212;
+  color: var(--text-color);
+  border: 1px solid var(--accent-color);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.search-input::placeholder { color: var(--text-dim); }
+
+/* Zoom readout in the footer; hidden at fit (scale 1), click resets */
+.info-zoom {
+  color: var(--accent-text);
+  cursor: pointer;
+  font-weight: 500;
+}
+
 /* Conversion mode switch next to the Convert button */
 .convert-mode {
   padding: 4px 4px;

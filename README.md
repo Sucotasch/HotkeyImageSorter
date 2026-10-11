@@ -48,6 +48,7 @@
 | **AI Metadata** | Ctrl+Q viewer: EXIF, PNG text chunks (A1111/ComfyUI/InvokeAI prompts & workflows), copy to clipboard |
 | **Prompt Badges** | Lazy ✦ badge on files that carry AI-generation metadata |
 | **AI Metadata Filter** | ✦ toggle in the sidebar: show only images that carry AI generation metadata; folder-wide scan with live progress, combines with the type filter |
+| **Name Search** | Ctrl+F: live substring filter over file names (any part of the name), combines with the type and AI filters |
 | **Metadata Export** | Export metadata next to the image as `.metadata.json` / `.metadata.txt` from the Ctrl+Q modal |
 | **Lossless JPEG** | 90/180/270° rotation without re-encoding (libjpeg-turbo) |
 | **Metadata-safe edits** | Rotate/crop preserve EXIF, ICC, XMP, comments and PNG prompt chunks |
@@ -375,6 +376,7 @@ Moves image to system trash (configurable in settings).
 | `Ctrl+Q` | Image metadata viewer (EXIF / AI prompt / copy / export) |
 | `Ctrl+J` | Convert selected PNGs to JPG (with metadata) |
 | `Ctrl+B` | Toggle the right info panel (shortcuts & commands) |
+| `Ctrl+F` | Search in file names (live substring filter) |
 | `Mouse Wheel` | Zoom in/out |
 | `Ctrl+0` | Reset zoom |
 
@@ -642,6 +644,7 @@ Contributions are welcome! Please read our contributing guidelines before submit
 | **AI-метаданные** | Просмотр Ctrl+Q: EXIF, PNG-чанки (промпты/workflow A1111/ComfyUI/InvokeAI), копирование в буфер |
 | **Значки промптов** | Ленивый ✦ у файлов с AI-метаданными генерации |
 | **Фильтр AI-метаданных** | Переключатель ✦ в сайдбаре: показать только изображения с AI-метаданными (промпт/workflow); скан всей папки с живым прогрессом, сочетается с фильтром типов |
+| **Поиск по имени** | Ctrl+F: живой поиск по подстроке в имени файла, сочетается с фильтрами типов и AI-метаданных |
 | **Экспорт метаданных** | Экспорт метаданных рядом с изображением как `.metadata.json` / `.metadata.txt` из модалки Ctrl+Q |
 | **Lossless JPEG** | Поворот 90/180/270° без перекодирования (libjpeg-turbo) |
 | **Сохранение метаданных** | Поворот/обрезка сохраняют EXIF, ICC, XMP, комментарии и PNG-чанки промптов |
@@ -970,6 +973,7 @@ Delete
 | `Ctrl+Q` | Просмотр метаданных (EXIF / AI-промпт / копирование / экспорт) |
 | `Ctrl+J` | Конвертация выбранных PNG в JPG (с метаданными) |
 | `Ctrl+B` | Показать/скрыть правую панель (шорткаты и команды) |
+| `Ctrl+F` | Поиск по имени файла (живой фильтр по подстроке) |
 | `Колесо мыши` | Масштабирование |
 | `Ctrl+0` | Сброс масштаба |
 

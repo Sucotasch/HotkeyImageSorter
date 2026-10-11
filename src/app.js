@@ -19,6 +19,8 @@ let state = {
   filterType: '',
   // true = show only images that carry AI generation metadata (✦).
   filterAI: false,
+  // Lowercase substring for the name search (empty = no name filter).
+  filterName: '',
   isConverting: false
 };
 
@@ -64,7 +66,12 @@ const el = {
   modalReport: document.getElementById('modal-report'),
   reportBody: document.getElementById('report-body'),
   btnToggleInfo: document.getElementById('btn-toggle-info'),
-  filterAI: document.getElementById('filter-ai')
+  filterAI: document.getElementById('filter-ai'),
+  btnSearch: document.getElementById('btn-search'),
+  searchRow: document.getElementById('search-row'),
+  searchInput: document.getElementById('search-input'),
+  btnSearchClear: document.getElementById('btn-search-clear'),
+  infoZoom: document.getElementById('info-zoom')
 };
 
 // True when any modal is open (settings, metadata or conversion report). Used
@@ -298,6 +305,35 @@ function setupEventListeners() {
 
   // Info panel toggle (also Ctrl+B)
   el.btnToggleInfo.addEventListener('click', toggleInfoPanel);
+
+  // Zoom readout doubles as click-to-reset
+  el.infoZoom.addEventListener('click', resetZoom);
+
+  // Name search: toggle row, live substring filter, Esc/clear semantics
+  el.btnSearch.addEventListener('click', toggleNameSearch);
+  el.searchInput.addEventListener('input', () => {
+    state.filterName = el.searchInput.value.trim().toLowerCase();
+    applyFilter();
+  });
+  el.searchInput.addEventListener('keydown', (e) => {
+    // The global handler skips text fields, so Esc semantics live here:
+    // first Esc wipes the query, second closes the row.
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      if (el.searchInput.value) {
+        clearNameSearch();
+      } else {
+        closeNameSearch();
+      }
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      el.searchInput.blur();
+    }
+  });
+  el.btnSearchClear.addEventListener('click', () => {
+    clearNameSearch();
+    el.searchInput.focus();
+  });
 
   // Cancel the running conversion; created JPGs stay on disk.
   el.btnCancelConvert.addEventListener('click', () => {
@@ -547,7 +583,17 @@ function filterImages() {
   if (state.filterAI) {
     list = list.filter(i => promptPaths.has(i.path));
   }
+  if (state.filterName) {
+    const needle = state.filterName;
+    list = list.filter(i => i.name.toLowerCase().includes(needle));
+  }
   return list;
+}
+
+// True when any view filter narrows the list — drives the "N of M" counter
+// and the "no matches" hint.
+function anyFilterActive() {
+  return !!(state.filterType || state.filterAI || state.filterName);
 }
 
 // AI-metadata filter: visual state of the ✦ toggle.
@@ -589,6 +635,39 @@ function applyFilter() {
   sortAndRender(state.currentPath);
 }
 
+// --- Name search -----------------------------------------------------------
+
+// Live substring filter over file names (any part of the name, case-
+// insensitive). The input lives in its own header row that appears on
+// demand (⌕ button / Ctrl+F) so the one-line header is not crowded.
+function openNameSearch() {
+  el.searchRow.classList.remove('hidden');
+  el.btnSearch.classList.add('active');
+  el.searchInput.focus();
+}
+
+function closeNameSearch() {
+  clearNameSearch();
+  el.searchRow.classList.add('hidden');
+  el.btnSearch.classList.remove('active');
+  el.searchInput.blur();
+}
+
+function clearNameSearch() {
+  if (!state.filterName && !el.searchInput.value) return;
+  state.filterName = '';
+  el.searchInput.value = '';
+  applyFilter();
+}
+
+function toggleNameSearch() {
+  if (el.searchRow.classList.contains('hidden')) {
+    openNameSearch();
+  } else {
+    closeNameSearch();
+  }
+}
+
 // Selects all VISIBLE rows (the type filter narrows what "all" means: filter
 // to PNG, then Ctrl+A selects exactly the PNGs). Pressing it again when
 // everything is already selected clears the selection.
@@ -620,7 +699,7 @@ function sortAndRender(initialLoadPath = null) {
     renderList();
     lastListSignature = signature;
   }
-  el.fileCount.textContent = state.filterAI
+  el.fileCount.textContent = anyFilterActive()
     ? `${state.images.length} of ${state.allImages.length} images`
     : `${state.images.length} images`;
   
@@ -727,7 +806,10 @@ function renderList() {
   if (state.images.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'list-empty';
-    empty.textContent = 'No images in this folder';
+    // Distinguish an empty folder from filters that match nothing.
+    empty.textContent = state.allImages.length > 0
+      ? 'No images match the current filters'
+      : 'No images in this folder';
     container.appendChild(empty);
   }
   container.scrollTop = prevScroll;
@@ -914,7 +996,8 @@ async function selectImage(index) {
   
   currentZoom = 1;
   el.mainImage.style.transform = 'scale(1)';
-  
+  updateZoomIndicator();
+
   // Update meta info
   el.infoDate.textContent = formatDateTime(img.modified);
   el.infoSize.textContent = formatBytes(img.size);
@@ -950,12 +1033,14 @@ async function handleGlobalKeydown(e) {
     return;
   }
   const active = document.activeElement;
+  const key = e.key.toLowerCase();
+  const code = e.code;
   // In text fields Ctrl+A means "select all text" (rename input), so let the
   // browser handle it there. Everywhere else it selects all visible rows —
   // including when focus sits on a <select> (the type filter), which would
   // otherwise make the browser select the whole page instead.
   const inTextField = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
-  if (e.ctrlKey && (e.code === 'KeyA' || e.key.toLowerCase() === 'a') && !inTextField && !anyModalOpen()) {
+  if (e.ctrlKey && (e.code === 'KeyA' || key === 'a') && !inTextField && !anyModalOpen()) {
     e.preventDefault();
     selectAllOrClear();
     // Drop focus from the type-filter <select> so the next Ctrl+A (and the
@@ -963,11 +1048,14 @@ async function handleGlobalKeydown(e) {
     if (active && active.tagName === 'SELECT') active.blur();
     return;
   }
-  if (active && (active.tagName === 'INPUT' || active.tagName === 'SELECT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'SELECT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
+    // Plain keys and text-editing combos (A/C/X/V/Z — select, copy, cut,
+    // paste, undo) belong to the field. The app's other Ctrl shortcuts
+    // (0/F/Q/J/R/B) keep working while a field has focus — e.g. the
+    // persistent search input must not silence Ctrl+0/F/Q/B.
+    if (!e.ctrlKey || ['KeyA', 'KeyC', 'KeyX', 'KeyV', 'KeyZ', 'KeyY'].includes(code)) return;
+  }
 
-  const key = e.key.toLowerCase();
-  const code = e.code;
-  
   if (code === 'ArrowDown' || key === 'arrowdown') {
     e.preventDefault();
     if (e.shiftKey && state.currentIndex >= 0 && state.currentIndex < state.images.length) {
@@ -1089,6 +1177,13 @@ async function handleGlobalKeydown(e) {
   } else if (e.ctrlKey && (code === 'KeyB' || key === 'b') && !anyModalOpen()) {
     e.preventDefault();
     toggleInfoPanel();
+  } else if (e.ctrlKey && (code === 'Digit0' || key === '0') && !anyModalOpen()) {
+    // Reset zoom to fit (documented in README/Commands).
+    e.preventDefault();
+    resetZoom();
+  } else if (e.ctrlKey && (code === 'KeyF' || key === 'f') && !anyModalOpen()) {
+    e.preventDefault();
+    openNameSearch();
   } else if ((key === 'enter' || code === 'Enter') && !(active && active.tagName === 'BUTTON') && !anyModalOpen()) {
     e.preventDefault();
     if (state.isCropActive) {
@@ -1375,10 +1470,25 @@ async function isFullscreenActive() {
 
 // Crop Logic (Cropper.js)
 
+// Wheel zoom; the footer readout shows the percentage while zoomed in
+// (scale 1 = fit, indicator hidden) and doubles as a click-to-reset.
 function applyZoom(deltaY) {
   if (deltaY < 0) currentZoom = Math.min(10, currentZoom + 0.1);
   else currentZoom = Math.max(0.1, currentZoom - 0.1);
   el.mainImage.style.transform = `scale(${currentZoom})`;
+  updateZoomIndicator();
+}
+
+function resetZoom() {
+  currentZoom = 1;
+  el.mainImage.style.transform = 'scale(1)';
+  updateZoomIndicator();
+}
+
+function updateZoomIndicator() {
+  const zoomed = Math.abs(currentZoom - 1) > 0.001;
+  el.infoZoom.classList.toggle('hidden', !zoomed);
+  if (zoomed) el.infoZoom.textContent = `${Math.round(currentZoom * 100)}%`;
 }
 
 // Enters crop mode: Cropper takes over the displayed image (the original

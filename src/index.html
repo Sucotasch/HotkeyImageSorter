@@ -27,7 +27,12 @@
             <option value="">All types</option>
           </select>
           <button id="filter-ai" class="filter-ai" title="Show only images with AI metadata" aria-pressed="false" aria-label="Show only images with AI metadata">✦</button>
+          <button id="btn-search" title="Search in file names (Ctrl+F)" aria-label="Search in file names">⌕</button>
           <button id="btn-refresh" title="Refresh list (keep position)" aria-label="Refresh list">⟳</button>
+        </div>
+        <div id="search-row" class="search-row hidden">
+          <input id="search-input" type="text" class="search-input" placeholder="Search in names…" aria-label="Search in file names">
+          <button id="btn-search-clear" class="hotkey-clear" title="Clear search" aria-label="Clear search">✕</button>
         </div>
       </div>
       <div id="image-list-container" class="virtual-list">
@@ -73,6 +78,7 @@
             <span id="info-dimensions" class="meta-item">—</span>
             <span id="info-date" class="meta-item">—</span>
             <span id="info-size" class="meta-item">—</span>
+            <span id="info-zoom" class="meta-item info-zoom hidden" title="Ctrl+0 — reset zoom"></span>
           </div>
         </div>
         <button id="btn-toggle-info" class="btn-action" title="Hide info panel (Ctrl+B)" aria-label="Toggle info panel">▸</button>
@@ -101,6 +107,8 @@
           <kbd>Ctrl+C</kbd> Toggle Crop<br>
           <kbd>Ctrl+J</kbd> Convert PNG→JPG<br>
           <kbd>Ctrl+A</kbd> Select All (visible)<br>
+          <kbd>Ctrl+F</kbd> Search in Names<br>
+          <kbd>Ctrl+0</kbd> Reset Zoom<br>
           <kbd>Ctrl+Z</kbd> Undo / <kbd>Ctrl+X</kbd> Redo<br>
           <kbd>Enter</kbd> Fullscreen<br>
           <kbd>Ctrl+Q</kbd> Image Metadata<br>
